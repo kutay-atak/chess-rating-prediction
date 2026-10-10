@@ -16,6 +16,9 @@ def fake_predictor(sans, clocks, base, inc, evals=None):
              "black": {"rating": 1500 - t, "low": 1400 - t, "high": 1600}} for t in range(len(sans) + 1)]
 
 
+fake_predictor.uses_evals = True
+
+
 @pytest.fixture(autouse=True)
 def no_model(monkeypatch):
     monkeypatch.setattr(web.server, "load_predictor", lambda: fake_predictor)
@@ -195,8 +198,14 @@ def test_trained_model_gives_an_estimate_per_ply():
 
 def play_local(monkeypatch, engine, ucis):
     seen = []
+
+    def predictor(*args):
+        seen.append(args[4:])
+        return fake_predictor(*args)
+
+    predictor.uses_evals = True
     monkeypatch.setattr(web.server, "load_engine", lambda: engine)
-    monkeypatch.setattr(web.server, "load_predictor", lambda: lambda *a: seen.append(a[4:]) or fake_predictor(*a))
+    monkeypatch.setattr(web.server, "load_predictor", lambda: predictor)
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         hello(ws, "token-engine", "me")
         ws.send_json({"type": "local", "tc": "3+0"})

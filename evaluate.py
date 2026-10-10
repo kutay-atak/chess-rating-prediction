@@ -23,7 +23,7 @@ import numpy as np
 import onnxruntime as ort
 
 from export_onnx import META, ONNX
-from features import MAX_PLIES, Z80, split_outputs, vocab_index
+from features import EVAL_FEATURES, MAX_PLIES, Z80, split_outputs, vocab_index
 from train import Encoded, batches, load_games
 
 matplotlib.use("Agg")
@@ -39,6 +39,7 @@ class Model:
         self.meta = json.load(open(f"{folder}/{META}"))
         self.session = ort.InferenceSession(f"{folder}/{ONNX}")
         self.n_numeric = self.session.get_inputs()[1].shape[2]
+        self.uses_evals = self.n_numeric > EVAL_FEATURES.start
 
     def predict(self, data, hide_evals=False):
         """Predicted (mu, sd), each [n_tokens, 2] in rating points, flat and aligned with data.tokens."""
@@ -137,7 +138,7 @@ def main():
     model = Model(args.model)
     meta = model.meta
     index = vocab_index(meta["vocab"])
-    kinds = {"evals": True, "no_evals": False}
+    kinds = {"evals": True, "no_evals": False} if model.uses_evals else {"no_evals": False}
 
     for kind, analysed in kinds.items():
         val = Encoded(load_games(args.games, "val", args.val_games, seed=1, analysed=analysed), index)
@@ -156,17 +157,17 @@ def main():
         games = load_games(args.games, "test", args.test_games, seed=1, analysed=analysed)
         test = Encoded(games, index)
         runs = {}
-        if analysed:
+        if analysed and model.uses_evals:
             runs["model with Stockfish evals"] = model.predict(test)
         runs["model without evals"] = model.predict(test, hide_evals=True)
         if baseline:
             runs["baseline model"] = baseline.predict(test, hide_evals=True)
-        shipped = (("model with Stockfish evals", meta["calibration"]["evals"]) if analysed
+        shipped = (("model with Stockfish evals", meta["calibration"]["evals"]) if analysed and model.uses_evals
                    else ("model without evals", meta["calibration"]["no_evals"]))
         rows, errors, ply = score(test, runs, tc_mean, meta["center"], shipped)
         metrics[title] = {"test games": len(test), f"after move {HEADLINE_MOVE}": rows[str(HEADLINE_MOVE)], "by move": rows}
         curves[title] = (errors, ply)
-        if analysed and args.stockfish_games:
+        if analysed and args.stockfish_games and model.uses_evals:
             metrics["stockfish check"] = stockfish_check(model, games, index, args.stockfish_games)
         del games, test
     metrics["calibration scales"] = {kind: {f"{lo}-{hi - 1}": round(meta["calibration"][kind][lo], 3)

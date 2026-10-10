@@ -15,6 +15,7 @@ import numpy as np
 PAD, START, UNK = 0, 1, 2
 MAX_PLIES = 320  # moves past this are not seen; the estimate stays at the last one
 N_NUMERIC = 12
+EVAL_FEATURES = slice(9, 12)  # numeric columns that come from engine evals; a model with 9 inputs has none
 Z80 = 1.2816  # half-width of a central 80% normal interval, in sigmas
 START_CP = 20  # roughly Stockfish's eval of the starting position, in centipawns
 

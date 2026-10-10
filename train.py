@@ -30,11 +30,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from features import MAX_PLIES, N_NUMERIC, PAD, build_vocab, encode, time_control, vocab_index
+from features import EVAL_FEATURES, MAX_PLIES, N_NUMERIC, PAD, build_vocab, encode, time_control, vocab_index
 from split import game_split
 
 COLUMNS = ["White", "Black", "WhiteElo", "BlackElo", "TimeControl", "moves", "clocks", "evals"]
-EVAL_FEATURES = slice(9, 12)  # numeric columns that come from engine evals
 TARGET_MOVE = 20
 
 

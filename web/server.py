@@ -254,7 +254,8 @@ async def ticker():
 @asynccontextmanager
 async def lifespan(app):
     global predictor, engine
-    predictor, engine = load_predictor(), load_engine()
+    predictor = load_predictor()
+    engine = load_engine() if predictor and predictor.uses_evals else None  # no point scoring moves otherwise
     task = asyncio.create_task(ticker())
     yield
     task.cancel()
