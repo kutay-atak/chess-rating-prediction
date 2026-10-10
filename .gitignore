@@ -2,6 +2,9 @@
 lichess/
 games/
 
+# training checkpoints (the exported model in model/ is committed)
+checkpoints/
+
 __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
