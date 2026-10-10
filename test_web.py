@@ -1,8 +1,24 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+import web.server
 from web.game import FIRST_MOVE_SECONDS, Game
 from web.server import app
+
+MODEL = Path(__file__).parent / "model"
+
+
+def fake_predictor(sans, clocks, base, inc):
+    """Stands in for the trained model so these tests don't need model/."""
+    return [{"ply": t, "white": {"rating": 1500 + t, "low": 1400, "high": 1600 + t},
+             "black": {"rating": 1500 - t, "low": 1400 - t, "high": 1600}} for t in range(len(sans) + 1)]
+
+
+@pytest.fixture(autouse=True)
+def no_model(monkeypatch):
+    monkeypatch.setattr(web.server, "load_predictor", lambda: fake_predictor)
 
 WHITE, BLACK = True, False
 FOOLS_MATE = ["f2f3", "e7e5", "g2g4", "d8h4"]
@@ -151,3 +167,13 @@ def test_friend_link_seats_the_second_player():
         state = next_state(b)
         assert state["started"] and len(state["you"]) == 1
         assert {p["name"] for p in state["players"].values()} == {"host", "guest"}
+
+
+@pytest.mark.skipif(not (MODEL / "rating_model.onnx").exists(), reason="no trained model in model/")
+def test_trained_model_gives_an_estimate_per_ply():
+    from web.predictor import Predictor
+    out = Predictor(MODEL)(["e4", "e5", "Nf3"], [180, 180, 178], 180, 2)
+    assert [e["ply"] for e in out] == [0, 1, 2, 3]
+    for e in out:
+        for side in ("white", "black"):
+            assert 0 < e[side]["low"] <= e[side]["rating"] <= e[side]["high"] < 4000
