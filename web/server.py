@@ -171,7 +171,7 @@ async def handle(client, msg):
             other.clients.discard(client)
         return await join(client, room)
     color, g = seat_of(room, client), room.game
-    if color is None or not room.started:
+    if color is None or (not room.started and kind != "abort"):
         return
     if kind == "move":
         try:
