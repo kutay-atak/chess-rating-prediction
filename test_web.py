@@ -23,6 +23,7 @@ fake_predictor.uses_evals = True
 def no_model(monkeypatch):
     monkeypatch.setattr(web.server, "load_predictor", lambda: fake_predictor)
     monkeypatch.setattr(web.server, "load_engine", lambda: None)
+    monkeypatch.setattr(web.server, "load_performance", lambda: None)
 
 
 class FakeEngine:
@@ -228,3 +229,11 @@ def test_engine_evals_reach_the_model(monkeypatch):
 def test_engine_failure_falls_back_to_moves_and_clocks(monkeypatch):
     state, seen = play_local(monkeypatch, FakeEngine(fail=True), ["e2e4"])
     assert not state["engine"] and seen[-1] == (None,) and len(state["estimates"]) == 2
+
+
+def test_with_an_engine_estimates_are_game_performance(monkeypatch):
+    from test_performance import toy_table
+    monkeypatch.setattr(web.server, "load_performance", lambda: (toy_table(), None))
+    state, seen = play_local(monkeypatch, FakeEngine(), ["e2e4", "e7e5"])
+    assert state["performance"] and len(state["estimates"]) == 3
+    assert not seen[1:]  # the moves-and-clocks model wasn't needed

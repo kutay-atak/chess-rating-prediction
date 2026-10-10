@@ -35,22 +35,24 @@
   <div class="backdrop" id="about" hidden>
     <div class="dialog">
       <button class="modal-close" data-act="close-about" aria-label="Close">✕</button>
-      <h2>How the rating estimate works</h2>
-      <p>While you play, a model guesses both players' ratings from the game alone: the moves so far,
-        how long each move took and how much time is left. It never sees who you are.</p>
-      <h3>Training</h3>
-      <p>It was trained on rated blitz games from the Lichess open database (CC0). For every half-move of
-        every game it learned to predict both players' Lichess blitz ratings. Players used to measure
-        accuracy were kept out of training entirely.</p>
-      <h3>The numbers</h3>
-      <p>Next to each name is the current estimate and, after the ±, the half-width of an 80% range:
-        on test games, the true rating fell inside that range about 8 times in 10. Expect it to start wide
-        and narrow as the game goes on. The chart shows the estimate after every half-move; click it, or a
-        move, to step back through the game.</p>
+      <h2>How the game performance works</h2>
+      <p>The number next to each name is how strong that player has played in this game so far, as a
+        Lichess blitz rating. It depends only on their own moves, so a blunder pulls down the player who
+        made it and leaves the opponent's number alone.</p>
+      <h3>Opening</h3>
+      <p>While the position is one that many Lichess players have reached (by any move order), the
+        estimate leans on the average rating of the players who reached it.</p>
+      <h3>After the opening</h3>
+      <p>Stockfish scores every move. From how much winning chance each move gave away, every move gets
+        an accuracy from 0 to 100, and each player's running accuracy is compared with real Lichess
+        games: the number is the median rating of players who had that accuracy after that many moves,
+        and the ± range covers the middle 80% of them.</p>
+      <h3>Without Stockfish</h3>
+      <p>If Stockfish isn't installed where the site runs, the panel says so and the numbers come from
+        a model that guesses each player's rating from the moves and clocks instead.</p>
       <h3>Limits</h3>
-      <p>Ratings are Lichess Glicko-2 blitz ratings, not FIDE Elo. Lichess pairs players of similar
-        strength, so when two very different players meet here the model tends to pull their estimates
-        toward each other. Only blitz time controls are offered because that is all it was trained on.</p>
+      <p>Ratings are Lichess Glicko-2 blitz ratings, not FIDE Elo, from rated blitz games in the Lichess
+        open database (CC0). One game is a small sample: early numbers are rough.</p>
       <p class="note">Pieces: Colin M.L. Burnett (cburnett), BSD/GPL/GFDL. Board logic: chess.js (BSD-2-Clause).</p>
     </div>
   </div>

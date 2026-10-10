@@ -6,11 +6,12 @@ One WebSocket per browser tab at /ws. A client says hello with a token it keeps 
 a reload gets its seat back), then seeks a game (matchmaking per time control), creates a friend
 game (invite link /game/<id>) or a pass-and-play game (one client plays both sides), and joins
 games by id. After every change the server sends each client in a game the full game state,
-including the model's rating estimates after every ply so far.
+including each player's estimate after every ply so far.
 
 With Stockfish installed (on PATH, or STOCKFISH=/path), each move is scored by the engine and the
-model uses those evals; the estimate for a move arrives once its eval is in. Without Stockfish, or
-if it fails mid-game, the model runs on moves and clocks alone.
+estimates are per-game performance ratings (performance.py: opening book, then move accuracy); the
+estimate for a move arrives once its eval is in. Without Stockfish, or if it fails mid-game, they
+come from the moves-and-clocks model in model/ instead.
 """
 import asyncio
 import os
@@ -26,6 +27,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import performance
 from web.engine import Engine, find_stockfish
 from web.game import Game
 from web.predictor import Predictor
@@ -63,13 +65,21 @@ class Room:
 
 rooms: dict[str, Room] = {}
 seeks: dict[str, Client] = {}  # time control -> the client waiting for an opponent
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", Path(__file__).parent.parent / "model"))
 predictor = None
+perf = None  # (accuracy table, opening book or None) for the performance rating
 engine = None
 
 
 def load_predictor():
-    folder = Path(os.environ.get("MODEL_DIR", Path(__file__).parent.parent / "model"))
-    return Predictor(folder) if (folder / "rating_model.onnx").exists() else None
+    return Predictor(MODEL_DIR) if (MODEL_DIR / "rating_model.onnx").exists() else None
+
+
+def load_performance():
+    if not (MODEL_DIR / "performance.json").exists():
+        return None
+    book = MODEL_DIR / "opening_book.npz"
+    return performance.Table.load(MODEL_DIR / "performance.json"), performance.Book(book) if book.exists() else None
 
 
 def load_engine():
@@ -89,9 +99,14 @@ def new_room(mode, tc, seats, names):
 
 
 def update_estimates(room):
-    """Estimates after every ply that has what the model needs (its eval, when there's an engine)."""
+    """Estimates after every ply that has what they need (its eval, when there's an engine)."""
     g, n = room.game, room.game.ply if room.evals is None else len(room.evals)
-    room.estimates = predictor(g.sans[:n], g.clocks[:n], g.base, g.inc, room.evals) if predictor else []
+    if room.evals is not None and perf:
+        room.estimates = performance.estimates(g.sans, room.evals, *perf)
+    elif predictor:
+        room.estimates = predictor(g.sans[:n], g.clocks[:n], g.base, g.inc, room.evals)
+    else:
+        room.estimates = []
 
 
 async def analyse(room):
@@ -131,7 +146,8 @@ def state(room, client):
         "result": g.result, "reason": g.reason, "winner": g.winner(),
         "draw_offer": COLOR[g.draw_offer] if g.draw_offer is not None else None,
         "rematch": sorted(COLOR[c] for c in room.rematch), "next_id": room.next_id,
-        "estimates": room.estimates, "model": predictor is not None, "engine": room.evals is not None,
+        "estimates": room.estimates, "model": bool(predictor or perf), "engine": room.evals is not None,
+        "performance": room.evals is not None and perf is not None,
     }
 
 
@@ -253,9 +269,10 @@ async def ticker():
 
 @asynccontextmanager
 async def lifespan(app):
-    global predictor, engine
-    predictor = load_predictor()
-    engine = load_engine() if predictor and predictor.uses_evals else None  # no point scoring moves otherwise
+    global predictor, perf, engine
+    predictor, perf = load_predictor(), load_performance()
+    wants_evals = perf or (predictor and predictor.uses_evals)
+    engine = load_engine() if wants_evals else None  # no point scoring moves otherwise
     task = asyncio.create_task(ticker())
     yield
     task.cancel()

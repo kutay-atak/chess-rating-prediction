@@ -9,7 +9,7 @@ import chess.engine
 
 from prepare_games import MATE
 
-DEPTH = int(os.environ.get("STOCKFISH_DEPTH", 12))
+DEPTH = int(os.environ.get("STOCKFISH_DEPTH", 14))
 
 
 def find_stockfish():
