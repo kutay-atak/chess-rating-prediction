@@ -13,6 +13,7 @@ import tempfile
 from multiprocessing import Pool
 
 import numpy as np
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from performance import Book, position_keys
@@ -25,11 +26,12 @@ BUCKETS = 16  # positions are counted one hash bucket at a time, so memory stays
 def scan(args):
     """Save (keys, White rating, Black rating) for every position in the first `plies` of train games."""
     path, plies, out = args
-    df = pq.read_table(path, columns=["White", "Black", "WhiteElo", "BlackElo", "moves"]).to_pandas()
+    t = pq.read_table(path, columns=["White", "Black", "WhiteElo", "BlackElo", "moves"])
+    df = t.set_column(4, "moves", pc.list_slice(t["moves"], 0, plies)).to_pandas()  # first plies only: less memory
     df = df[game_split(df.White, df.Black).to_numpy() == "train"]
     keys, white, black = [], [], []
     for moves, w, b in zip(df.moves, df.WhiteElo, df.BlackElo):
-        k = position_keys(list(moves[:plies]))
+        k = position_keys(list(moves))
         keys.append(k)
         white.append(np.full(len(k), w, dtype=np.int16))
         black.append(np.full(len(k), b, dtype=np.int16))

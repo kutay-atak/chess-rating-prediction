@@ -93,8 +93,8 @@ def fit(k, acc, rating, weight):
             cell = slice(starts[lo], starts[hi + 1])
             for name, value in zip(("low", "median", "high"), weighted_quantiles(r[cell], w[cell], (0.1, 0.5, 0.9))):
                 out[name][kk, b] = value
-    for name in out:  # a more accurate game never means a lower rating
-        out[name][1:] = np.maximum.accumulate(out[name][1:], axis=1)
+    for name, t in out.items():  # a more accurate game never means a lower rating; averaging both sides avoids bias
+        t[1:] = (np.maximum.accumulate(t[1:], axis=1) + np.minimum.accumulate(t[1:, ::-1], axis=1)[:, ::-1]) / 2
     return {"step": STEP, **{name: np.round(t).tolist() for name, t in out.items()}}
 
 
