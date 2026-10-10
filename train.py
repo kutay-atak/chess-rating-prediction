@@ -29,41 +29,50 @@ COLUMNS = ["White", "Black", "WhiteElo", "BlackElo", "TimeControl", "moves", "cl
 CHECKPOINT = "checkpoints/best.pt"
 
 
-def load_games(folder, split, limit=None, seed=0):
-    """DataFrame of up to `limit` games of one split, sampled evenly across shards.
+def iter_games(folder, split, limit=None, seed=0, columns=COLUMNS):
+    """One DataFrame per shard: up to `limit` games of one split in total, sampled evenly across shards.
 
-    Filters with pyarrow before converting, so only the kept games become Python lists.
+    Filters with pyarrow before converting, so only the kept games become Python objects.
     """
     shards = sorted(glob.glob(f"{folder}/*.parquet"))
     per_shard = None if limit is None else math.ceil(limit / len(shards))
     rng = np.random.default_rng(seed)
-    parts = []
     for path in shards:
         names = pq.read_table(path, columns=["White", "Black"]).to_pandas()
         keep = np.flatnonzero(game_split(names.White, names.Black).to_numpy() == split)
         if per_shard is not None and len(keep) > per_shard:
             keep = np.sort(rng.choice(keep, per_shard, replace=False))
-        parts.append(pq.read_table(path, columns=COLUMNS).take(keep).to_pandas())
-    df = pd.concat(parts, ignore_index=True)
+        yield pq.read_table(path, columns=columns).take(keep).to_pandas()
+
+
+def load_games(folder, split, limit=None, seed=0, columns=COLUMNS):
+    """iter_games as a single DataFrame, for val/test-sized sets."""
+    df = pd.concat(iter_games(folder, split, limit, seed, columns), ignore_index=True)
     return df if limit is None else df.iloc[:limit]
 
 
 class Encoded:
     """Games as flat arrays: tokens and numeric features end to end, plus per-game offsets."""
 
-    def __init__(self, df, index):
-        tokens, numeric, lengths = [], [], []
-        for sans, clocks, tc in zip(df.moves, df.clocks, df.TimeControl):
-            t, f = encode(list(sans), list(clocks), *time_control(tc), index)
-            tokens.append(t.astype(np.int32))
-            numeric.append(f.astype(np.float16))
-            lengths.append(len(t))
+    def __init__(self, frames, index):
+        """frames: a DataFrame of games, or an iterable of them (encoded one at a time to save memory)."""
+        if isinstance(frames, pd.DataFrame):
+            frames = [frames]
+        tokens, numeric, lengths, ratings, tcs = [], [], [], [], []
+        for df in frames:
+            for sans, clocks, tc in zip(df.moves, df.clocks, df.TimeControl):
+                t, f = encode(list(sans), list(clocks), *time_control(tc), index)
+                tokens.append(t.astype(np.int32))
+                numeric.append(f.astype(np.float16))
+                lengths.append(len(t))
+            ratings.append(df[["WhiteElo", "BlackElo"]].to_numpy(np.float32))
+            tcs.append(df.TimeControl.to_numpy())
         self.tokens = np.concatenate(tokens)
         self.numeric = np.concatenate(numeric)
         self.lengths = np.array(lengths)
         self.offsets = np.concatenate([[0], np.cumsum(self.lengths)])
-        self.ratings = df[["WhiteElo", "BlackElo"]].to_numpy(np.float32)
-        self.time_control = df.TimeControl.to_numpy()
+        self.ratings = np.concatenate(ratings)
+        self.time_control = np.concatenate(tcs)
 
     def __len__(self):
         return len(self.lengths)
@@ -182,12 +191,10 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     t0 = time.time()
-    train_df = load_games(args.games, "train", args.n_games, args.seed)
-    val_df = load_games(args.games, "val", args.val_games, args.seed)
-    vocab = build_vocab(train_df.moves.iloc[:500_000])
+    vocab = build_vocab(load_games(args.games, "train", 300_000, args.seed, columns=["moves"]).moves)
     index = vocab_index(vocab)
-    train, val = Encoded(train_df, index), Encoded(val_df, index)
-    del train_df, val_df
+    train = Encoded(iter_games(args.games, "train", args.n_games, args.seed), index)
+    val = Encoded(load_games(args.games, "val", args.val_games, args.seed), index)
     center = float(train.ratings.mean())
     scale = float(train.ratings.std())
     print(f"{len(train):,} train / {len(val):,} val games, {len(train.tokens):,} train tokens, "

@@ -33,9 +33,11 @@ def numeric_features(clocks, base, inc):
 
     clocks[i] is the mover's seconds left after half-move i (White moves at even i). Time spent on a
     move is the mover's previous clock (the base time for their first move) plus the increment
-    minus their clock now.
+    minus their clock now. Clocks are scaled by Lichess's estimated game length, base + 40 * inc,
+    which unlike the base time is never 0 for blitz (0+5 is blitz).
     """
     clocks = np.asarray(clocks, dtype=np.float64)
+    total = base + 40 * inc
     n = len(clocks)
     prev = np.full(n, float(base))
     prev[2:] = clocks[:-2]
@@ -46,12 +48,12 @@ def numeric_features(clocks, base, inc):
     f = np.zeros((n + 1, N_NUMERIC))
     f[0, 7] = 1  # start token
     f[1:, 0] = np.where(np.arange(n) % 2 == 0, 1, -1)  # White / Black move
-    f[1:, 1] = clocks / base
+    f[1:, 1] = clocks / total
     f[1:, 2] = np.log1p(clocks) / 5
     f[1:, 3] = np.log1p(spent) / 3
     f[1:, 4] = spent / np.maximum(prev + inc, 1)
-    f[1:, 8] = other / base
-    f[:, 5] = np.log(base / 180)
+    f[1:, 8] = other / total
+    f[:, 5] = base / 300
     f[:, 6] = inc / 5
     return f.astype(np.float32)
 

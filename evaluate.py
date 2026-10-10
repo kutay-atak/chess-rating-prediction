@@ -76,7 +76,7 @@ def main():
     with open(META, "w") as f:
         json.dump(meta, f)
 
-    train_df = load_games(args.games, "train", args.train_games, seed=1)
+    train_df = load_games(args.games, "train", args.train_games, seed=1, columns=["TimeControl", "WhiteElo", "BlackElo"])
     tc_mean = (train_df.groupby("TimeControl")[["WhiteElo", "BlackElo"]].mean().mean(axis=1)).to_dict()
     del train_df
 
