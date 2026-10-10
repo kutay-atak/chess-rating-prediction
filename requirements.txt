@@ -1,0 +1,5 @@
+pandas
+pyarrow
+matplotlib
+pytest
+huggingface_hub
