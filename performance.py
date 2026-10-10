@@ -7,10 +7,14 @@ Two sources, blended per player after every half-move:
   accuracy 0-100 (Lichess's formula; a hung queen is about 0). The player's running game accuracy
   is looked up in a table, fitted on real games, of the ratings of players who had that accuracy
   after that many moves (fit_performance.py).
-The book's weight is its game count n against BOOK_PRIOR; after the game leaves the book, that n
-halves with every own move, so each line slides from the book to accuracy instead of jumping.
+The book's weight is its game count n against BOOK_PRIOR; after the game leaves the book, n starts
+from at most BOOK_MIN (the position now has fewer games than that) and halves with every own move, so
+each line slides from the book to accuracy instead of jumping, yet a blunder still shows at once.
 
-Numpy and python-chess only, so the web server needs no torch.
+A player's estimate only changes when that player moves: their book position is the one right after
+their own move, and their accuracy only counts their own moves.
+
+Numpy and python-chess only.
 """
 import json
 
@@ -18,32 +22,35 @@ import chess
 import chess.polyglot
 import numpy as np
 
-from features import START_CP, Z80, win_chance
-
 BOOK_PRIOR = 20  # pseudo-games of weight the accuracy estimate gets against the book
+BOOK_MIN = 20  # opening_book.py keeps positions seen in at least this many games
 MIN_ACCURACY = 10  # floor in the harmonic mean, so a single 0% move doesn't zero the whole game
+START_CP = 20  # roughly Stockfish's eval of the starting position, in centipawns
+Z80 = 1.2816  # half-width of a central 80% normal interval, in sigmas
+
+
+def win_percent(cp):
+    """White's winning chance 0-100 from an eval in centipawns (Lichess's formula)."""
+    return 100 / (1 + np.exp(-0.00368208 * np.asarray(cp, dtype=np.float64)))
 
 
 def move_accuracy(evals):
     """Accuracy 0-100 of each half-move, from the eval after each move (centipawns, White's side)."""
-    white = 100 * win_chance(evals)
-    before = np.concatenate([[100 * win_chance(START_CP)], white[:-1]])
+    white = win_percent(evals)
+    before = np.concatenate([[win_percent(START_CP)], white[:-1]])
     mover = np.where(np.arange(len(white)) % 2 == 0, 1, -1)
     lost = mover * (before - white)  # win% the mover gave away; negative if they gained
     return np.clip(103.1668 * np.exp(-0.04354 * lost) - 3.1669, 0, 100)
 
 
-def game_accuracy(acc, metric="blend"):
-    """Running game accuracy after each of one player's moves, given that player's move accuracies.
-
-    "mean" is the plain average; "blend" averages it with the harmonic mean, which a blunder pulls
-    down much harder (as in Lichess's game accuracy)."""
+def game_accuracy(acc):
+    """Running game accuracy after each of one player's moves, given that player's move accuracies:
+    the average of the mean and the harmonic mean, which a blunder pulls down much harder."""
     acc = np.asarray(acc, dtype=np.float64)
     k = np.arange(1, len(acc) + 1)
     mean = np.cumsum(acc) / k
-    if metric == "mean":
-        return mean
-    return (mean + k / np.cumsum(1 / np.maximum(acc, MIN_ACCURACY))) / 2
+    harmonic = k / np.cumsum(1 / np.maximum(acc, MIN_ACCURACY))
+    return (mean + harmonic) / 2
 
 
 def own_moves(n, side):
@@ -65,7 +72,7 @@ class Table:
     """Running accuracy -> (median, 10th, 90th percentile) rating, per number of own moves."""
 
     def __init__(self, data):
-        self.metric, self.step = data["metric"], data["step"]
+        self.step = data["step"]
         self.median, self.low, self.high = (np.array(data[x]) for x in ("median", "low", "high"))
         self.k_max = self.median.shape[0] - 1  # row k_max holds every k >= k_max; row 0 is before any move
 
@@ -75,7 +82,8 @@ class Table:
             return cls(json.load(f))
 
     def lookup(self, k, acc):
-        """Arrays (median, low, high) for own-move counts k and running accuracies acc (nan when k=0)."""
+        """Arrays (median, low, high) for own-move counts k and running accuracies acc (ignored when k=0),
+        interpolated between bin centres."""
         k = np.minimum(np.asarray(k), self.k_max)
         pos = np.clip((np.nan_to_num(np.asarray(acc, dtype=np.float64)) - self.step / 2) / self.step,
                       0, self.median.shape[1] - 1)
@@ -86,7 +94,8 @@ class Table:
 
 
 class Book:
-    """Opening book from opening_book.py: per position, game count and mean White / Black rating."""
+    """Opening book from opening_book.py: per position, game count, mean White / Black rating and the
+    spread of both players' ratings."""
 
     def __init__(self, path):
         data = np.load(path)
@@ -100,19 +109,21 @@ class Book:
 
 
 def book_weights(found, n_book, side):
-    """Per ply, the book's weight for `side` and which book entry it refers to (-1: none yet).
+    """Per ply 0..T, the book's weight for `side` and the book entry it refers to (-1: none).
 
-    In the book: weight = that position's game count. After leaving it: the last in-book count,
-    halved for every move this side has made since."""
+    Only the start position and the positions right after this side's own moves count, so the
+    opponent's moves never change this side's estimate. In the book: weight = that position's game
+    count. After leaving it: the last in-book count, capped at BOOK_MIN, halved for every own move since."""
     weight, entry = np.zeros(len(found)), np.full(len(found), -1)
     last, since = -1, 0
     for t, i in enumerate(found):
-        if i >= 0:
-            last, since = i, 0
-        elif last >= 0 and t > 0 and (t - 1) % 2 == side:
-            since += 1
+        if t == 0 or (t - 1) % 2 == side:
+            if i >= 0:
+                last, since = i, 0
+            elif last >= 0:
+                since += 1
         if last >= 0:
-            weight[t], entry[t] = n_book[last] * 0.5 ** since, last
+            weight[t], entry[t] = (min(n_book[last], BOOK_MIN) if since else n_book[last]) * 0.5 ** since, last
     return weight, entry
 
 
@@ -127,13 +138,14 @@ def estimates(sans, evals, table, book=None):
     out = [{"ply": t} for t in range(n + 1)]
     for side, name in enumerate(("white", "black")):
         k = own_moves(n, side)
-        running = np.concatenate([[np.nan], game_accuracy(acc[side::2], table.metric)])[k]
-        a_mid, a_low, a_high = table.lookup(k, running)
-        weight, entry = book_weights(found, book.n if book else None, side)
-        mean = (book.white if side == 0 else book.black)[entry] if book else 0
-        spread = Z80 * book.sd[entry] if book else 0
-        mix = lambda b, a: (weight * b + BOOK_PRIOR * a) / (weight + BOOK_PRIOR)  # noqa: E731
-        mid, low, high = mix(mean, a_mid), mix(mean - spread, a_low), mix(mean + spread, a_high)
+        running = np.concatenate([[np.nan], game_accuracy(acc[side::2])])[k]
+        mid, low, high = table.lookup(k, running)
+        if book:
+            weight, entry = book_weights(found, book.n, side)
+            mean = (book.white if side == 0 else book.black)[entry]
+            spread = Z80 * book.sd[entry]
+            mix = lambda b, a: (weight * b + BOOK_PRIOR * a) / (weight + BOOK_PRIOR)  # noqa: E731
+            mid, low, high = mix(mean, mid), mix(mean - spread, low), mix(mean + spread, high)
         for t in range(n + 1):
             out[t][name] = {"rating": round(mid[t]), "low": round(low[t]), "high": round(high[t])}
     return out

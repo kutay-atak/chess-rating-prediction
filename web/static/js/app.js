@@ -390,7 +390,7 @@ function homePanel(busy) {
     <button class="btn-row" data-act="friend" ${busy || seeking ? "disabled" : ""}>${icon("link")}<span>Play a Friend<small>Send an invite link</small></span></button>
     <button class="btn-row" data-act="local-setup" ${busy || seeking ? "disabled" : ""}>${icon("people")}<span>Pass and Play<small>Two players, one screen</small></span></button>
     ${busy ? `<p class="note">Finish your current game before starting another.</p>` : ""}
-    <p class="note">While you play, a model trained on Lichess blitz games estimates both players' ratings after every move.
+    <p class="note">While you play, each player gets a game performance rating after every move: how strong they have played in this game, on the Lichess blitz scale.
       <a class="link" data-act="about">How it works</a></p>
   </div>`;
 }
@@ -425,11 +425,12 @@ function gamePanel(g) {
       <span class="who">${esc(g.players[color].name)}</span>
       <span class="val">${e ? e.rating : "—"}</span><span class="rng">${e ? `${e.low}–${e.high}` : ""}</span></div>`;
   };
-  const estimate = g.model
-    ? `<section class="estimate"><div class="estimate-head"><h3>${g.performance ? "Game performance" : "Live rating estimate"}</h3><span>${plyLabel(Math.min(ply, g.estimates.length - 1))}</span></div>
-        <div class="engine-tag" title="${g.performance ? "How strong each player has played in this game, from the accuracy of their own moves (Stockfish) and, early on, the players who reached the same positions" : "Stockfish isn't available: a guess at each player's rating from moves and clocks"}">${g.performance ? "from Stockfish move accuracy" : "no Stockfish: rating guess from moves and clocks"}</div>
-        ${est("white")}${est("black")}<div class="chart" id="chart"></div></section>`
-    : `<section class="estimate"><div class="no-model">No model loaded: see the README to build model/.</div></section>`;
+  const estimate = g.unavailable
+    ? `<section class="estimate"><div class="estimate-head"><h3>Game performance</h3></div>
+        <div class="no-model">Estimate unavailable: ${esc(g.unavailable)}.</div></section>`
+    : `<section class="estimate"><div class="estimate-head"><h3>Game performance</h3><span>${plyLabel(Math.min(ply, g.estimates.length - 1))}</span></div>
+        <div class="engine-tag" title="How strong each player has played in this game so far, as a Lichess blitz rating: from the accuracy of their own moves (Stockfish) and, early on, the players who reached the same positions">how well each player has played this game</div>
+        ${est("white")}${est("black")}<div class="chart" id="chart"></div></section>`;
 
   const notices = [];
   const mine = g.you.length === 1 ? g.you[0] : null;
@@ -492,7 +493,7 @@ function showGameOver() {
       <svg class="trophy" viewBox="0 0 24 24"><path d="M7 3h10v2h4v3a5 5 0 0 1-4.6 5A6 6 0 0 1 13 16.9V19h3v2H8v-2h3v-2.1A6 6 0 0 1 7.6 13 5 5 0 0 1 3 8V5h4zm0 4H5v1a3 3 0 0 0 2 2.8zm10 0v3.8A3 3 0 0 0 19 8V7z"/></svg>
       <h2>${title}</h2><p>${esc(g.result === "*" ? REASONS[g.reason] : REASONS[g.reason] || g.reason)}</p></div>
     <div class="modal-players">${player("white")}<span class="modal-vs">vs</span>${player("black")}</div>
-    ${g.model && last > 0 ? `<div class="modal-caption">${g.performance ? "Game performance" : "Estimated Lichess blitz ratings"} after ${Math.ceil(last / 2)} moves (80% range)</div>` : ""}
+    ${last > 0 ? `<div class="modal-caption">Game performance after ${Math.ceil(last / 2)} moves (80% range)</div>` : ""}
     <div class="modal-actions"><button class="btn-green" data-act="new-same">New ${TIME_CONTROLS[g.tc]}</button>
       ${rematch}<button class="btn" data-act="close-modal">${icon("chart")}Review</button></div>`;
   el.hidden = false;

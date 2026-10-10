@@ -1,4 +1,4 @@
-"""Two-player blitz with live rating estimates.
+"""Two-player blitz with each player's live game performance rating.
 
   uvicorn web.server:app        (from the repo root; MODEL_DIR defaults to model/)
 
@@ -8,10 +8,10 @@ game (invite link /game/<id>) or a pass-and-play game (one client plays both sid
 games by id. After every change the server sends each client in a game the full game state,
 including each player's estimate after every ply so far.
 
-With Stockfish installed (on PATH, or STOCKFISH=/path), each move is scored by the engine and the
-estimates are per-game performance ratings (performance.py: opening book, then move accuracy); the
-estimate for a move arrives once its eval is in. Without Stockfish, or if it fails mid-game, they
-come from the moves-and-clocks model in model/ instead.
+Each move is scored by Stockfish (on PATH, or STOCKFISH=/path) in the background, and the estimates
+are per-game performance ratings (performance.py: opening book, then move accuracy); the estimate for
+a move arrives once its eval is in. Without Stockfish or the fitted files in model/, or if the engine
+fails mid-game, games still play and the page says the estimate is unavailable.
 """
 import asyncio
 import os
@@ -30,7 +30,6 @@ from fastapi.staticfiles import StaticFiles
 import performance
 from web.engine import Engine, find_stockfish
 from web.game import Game
-from web.predictor import Predictor
 
 STATIC = Path(__file__).parent / "static"
 TIME_CONTROLS = {"3+0": (180, 0), "3+2": (180, 2), "5+0": (300, 0), "5+3": (300, 3)}  # blitz only, like the training games
@@ -56,7 +55,7 @@ class Room:
     started: bool = True
     clients: set = field(default_factory=set)
     estimates: list = field(default_factory=list)
-    evals: list | None = None  # engine eval after each ply so far; None: no engine for this game
+    evals: list | None = None  # engine eval after each ply so far; None: no estimate for this game
     analysing: bool = False
     rematch: set = field(default_factory=set)
     next_id: str | None = None
@@ -66,13 +65,9 @@ class Room:
 rooms: dict[str, Room] = {}
 seeks: dict[str, Client] = {}  # time control -> the client waiting for an opponent
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", Path(__file__).parent.parent / "model"))
-predictor = None
 perf = None  # (accuracy table, opening book or None) for the performance rating
 engine = None
-
-
-def load_predictor():
-    return Predictor(MODEL_DIR) if (MODEL_DIR / "rating_model.onnx").exists() else None
+unavailable = None  # why there is no estimate, or None
 
 
 def load_performance():
@@ -86,27 +81,21 @@ def load_engine():
     try:
         return Engine() if find_stockfish() else None
     except Exception as e:
-        print(f"Stockfish didn't start ({e}); estimating from moves and clocks only")
+        print(f"Stockfish didn't start ({e}); games will have no estimate")
         return None
 
 
 def new_room(mode, tc, seats, names):
     room = Room(id=secrets.token_urlsafe(6), mode=mode, tc=tc, game=Game(*TIME_CONTROLS[tc]),
-                seats=seats, names=names, started=all(seats.values()), evals=[] if engine else None)
+                seats=seats, names=names, started=all(seats.values()), evals=[] if engine and perf else None)
     update_estimates(room)
     rooms[room.id] = room
     return room
 
 
 def update_estimates(room):
-    """Estimates after every ply that has what they need (its eval, when there's an engine)."""
-    g, n = room.game, room.game.ply if room.evals is None else len(room.evals)
-    if room.evals is not None and perf:
-        room.estimates = performance.estimates(g.sans, room.evals, *perf)
-    elif predictor:
-        room.estimates = predictor(g.sans[:n], g.clocks[:n], g.base, g.inc, room.evals)
-    else:
-        room.estimates = []
+    """Estimates after every ply whose eval is in."""
+    room.estimates = performance.estimates(room.game.sans, room.evals, *perf) if room.evals is not None else []
 
 
 async def analyse(room):
@@ -122,7 +111,7 @@ async def analyse(room):
             try:
                 room.evals.append(await asyncio.to_thread(engine.eval, board))
             except Exception:
-                room.evals = None  # the engine failed: this game carries on without evals
+                room.evals = None  # the engine failed: this game carries on without an estimate
         update_estimates(room)
         await broadcast(room)
     finally:
@@ -146,8 +135,8 @@ def state(room, client):
         "result": g.result, "reason": g.reason, "winner": g.winner(),
         "draw_offer": COLOR[g.draw_offer] if g.draw_offer is not None else None,
         "rematch": sorted(COLOR[c] for c in room.rematch), "next_id": room.next_id,
-        "estimates": room.estimates, "model": bool(predictor or perf), "engine": room.evals is not None,
-        "performance": room.evals is not None and perf is not None,
+        "estimates": room.estimates,
+        "unavailable": None if room.evals is not None else unavailable or "Stockfish stopped during this game",
     }
 
 
@@ -269,10 +258,13 @@ async def ticker():
 
 @asynccontextmanager
 async def lifespan(app):
-    global predictor, perf, engine
-    predictor, perf = load_predictor(), load_performance()
-    wants_evals = perf or (predictor and predictor.uses_evals)
-    engine = load_engine() if wants_evals else None  # no point scoring moves otherwise
+    global perf, engine, unavailable
+    perf = load_performance()
+    engine = load_engine() if perf else None  # no point scoring moves otherwise
+    unavailable = ("No fitted performance table in model/ (see the README)" if not perf else
+                   "Stockfish isn't installed where this site runs (see the README)" if not engine else None)
+    if unavailable:
+        print(f"Estimate unavailable: {unavailable}")
     task = asyncio.create_task(ticker())
     yield
     task.cancel()

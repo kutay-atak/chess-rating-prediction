@@ -1,42 +1,33 @@
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 
 import web.server
+from test_performance import QUEEN_BLUNDER_EVALS, toy_table
 from web.game import FIRST_MOVE_SECONDS, Game
 from web.server import app
 
-MODEL = Path(__file__).parent / "model"
-
-
-def fake_predictor(sans, clocks, base, inc, evals=None):
-    """Stands in for the trained model so these tests don't need model/."""
-    return [{"ply": t, "white": {"rating": 1500 + t, "low": 1400, "high": 1600 + t},
-             "black": {"rating": 1500 - t, "low": 1400 - t, "high": 1600}} for t in range(len(sans) + 1)]
-
-
-fake_predictor.uses_evals = True
-
 
 @pytest.fixture(autouse=True)
-def no_model(monkeypatch):
-    monkeypatch.setattr(web.server, "load_predictor", lambda: fake_predictor)
+def no_engine(monkeypatch):
+    """No Stockfish unless a test brings one; a toy accuracy table instead of model/."""
     monkeypatch.setattr(web.server, "load_engine", lambda: None)
-    monkeypatch.setattr(web.server, "load_performance", lambda: None)
+    monkeypatch.setattr(web.server, "load_performance", lambda: (toy_table(), None))
 
 
 class FakeEngine:
-    def __init__(self, fail=False):
-        self.fail = fail
+    """Returns evals[ply - 1] for the position after each ply."""
+
+    def __init__(self, evals=None, fail=False):
+        self.evals, self.fail = evals, fail
 
     def eval(self, board):
         if self.fail:
             raise RuntimeError("engine crashed")
-        return 25
+        return self.evals[board.ply() - 1] if self.evals else 25
 
     def close(self):
         pass
+
 
 WHITE, BLACK = True, False
 FOOLS_MATE = ["f2f3", "e7e5", "g2g4", "d8h4"]
@@ -144,7 +135,7 @@ def test_matchmaking_game_over_websocket():
         b.send_json({"type": "join", "id": room})
         state = next_state(b)
         assert {state["players"]["white"]["name"], state["players"]["black"]["name"]} == {"alice", "bob"}
-        assert state["model"] and len(state["estimates"]) == 1  # estimate before any move
+        assert "Stockfish" in state["unavailable"] and state["estimates"] == []  # no engine: no estimate
         sockets = {"white": a if next_state(a)["you"] == ["white"] else b}
         sockets["black"] = b if sockets["white"] is a else a
 
@@ -153,9 +144,7 @@ def test_matchmaking_game_over_websocket():
             state = next_state(a)
             next_state(b)
         assert state["result"] == "0-1" and state["reason"] == "checkmate"
-        assert len(state["estimates"]) == 5
-        est = state["estimates"][-1]["white"]
-        assert est["low"] <= est["rating"] <= est["high"]
+        assert state["estimates"] == []
 
 
 def test_pass_and_play_moves_both_sides():
@@ -187,26 +176,8 @@ def test_friend_link_seats_the_second_player():
         assert {p["name"] for p in state["players"].values()} == {"host", "guest"}
 
 
-@pytest.mark.skipif(not (MODEL / "rating_model.onnx").exists(), reason="no trained model in model/")
-def test_trained_model_gives_an_estimate_per_ply():
-    from web.predictor import Predictor
-    out = Predictor(MODEL)(["e4", "e5", "Nf3"], [180, 180, 178], 180, 2)
-    assert [e["ply"] for e in out] == [0, 1, 2, 3]
-    for e in out:
-        for side in ("white", "black"):
-            assert 0 < e[side]["low"] <= e[side]["rating"] <= e[side]["high"] < 4000
-
-
 def play_local(monkeypatch, engine, ucis):
-    seen = []
-
-    def predictor(*args):
-        seen.append(args[4:])
-        return fake_predictor(*args)
-
-    predictor.uses_evals = True
     monkeypatch.setattr(web.server, "load_engine", lambda: engine)
-    monkeypatch.setattr(web.server, "load_predictor", lambda: predictor)
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         hello(ws, "token-engine", "me")
         ws.send_json({"type": "local", "tc": "3+0"})
@@ -216,24 +187,31 @@ def play_local(monkeypatch, engine, ucis):
         for uci in ucis:
             ws.send_json({"type": "move", "id": room, "uci": uci})
         state = next_state(ws)
-        while len(state["estimates"]) < len(ucis) + 1:  # estimates follow once the evals are in
+        while not state["unavailable"] and len(state["estimates"]) < len(ucis) + 1:  # estimates follow the evals
             state = next_state(ws)
-    return state, seen
+    return state
 
 
-def test_engine_evals_reach_the_model(monkeypatch):
-    state, seen = play_local(monkeypatch, FakeEngine(), ["e2e4", "e7e5"])
-    assert state["engine"] and seen[-1] == ([25, 25],)
+def test_with_an_engine_each_move_gets_an_estimate(monkeypatch):
+    state = play_local(monkeypatch, FakeEngine(), ["e2e4", "e7e5"])
+    assert state["unavailable"] is None and [e["ply"] for e in state["estimates"]] == [0, 1, 2]
+    est = state["estimates"][-1]["white"]
+    assert est["low"] <= est["rating"] <= est["high"]
 
 
-def test_engine_failure_falls_back_to_moves_and_clocks(monkeypatch):
-    state, seen = play_local(monkeypatch, FakeEngine(fail=True), ["e2e4"])
-    assert not state["engine"] and seen[-1] == (None,) and len(state["estimates"]) == 2
+def test_hung_queen_drops_only_the_movers_line(monkeypatch):
+    ucis = ["e2e4", "e7e5", "d1h5", "g8f6", "h5f7", "e8f7"]  # 1.e4 e5 2.Qh5 Nf6 3.Qxf7+?? Kxf7
+    est = play_local(monkeypatch, FakeEngine(QUEEN_BLUNDER_EVALS), ucis)["estimates"]
+    assert est[4]["white"]["rating"] - est[5]["white"]["rating"] > 300
+    assert est[5]["black"] == est[4]["black"]
 
 
-def test_with_an_engine_estimates_are_game_performance(monkeypatch):
-    from test_performance import toy_table
-    monkeypatch.setattr(web.server, "load_performance", lambda: (toy_table(), None))
-    state, seen = play_local(monkeypatch, FakeEngine(), ["e2e4", "e7e5"])
-    assert state["performance"] and len(state["estimates"]) == 3
-    assert not seen[1:]  # the moves-and-clocks model wasn't needed
+def test_engine_failure_says_unavailable(monkeypatch):
+    state = play_local(monkeypatch, FakeEngine(fail=True), ["e2e4"])
+    assert state["unavailable"] == "Stockfish stopped during this game" and state["estimates"] == []
+
+
+def test_without_a_fitted_table_the_estimate_is_unavailable(monkeypatch):
+    monkeypatch.setattr(web.server, "load_performance", lambda: None)
+    state = play_local(monkeypatch, FakeEngine(), ["e2e4"])
+    assert "model/" in state["unavailable"] and state["sans"] == ["e4"]
