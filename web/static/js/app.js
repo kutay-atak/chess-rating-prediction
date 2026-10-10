@@ -427,6 +427,7 @@ function gamePanel(g) {
   };
   const estimate = g.model
     ? `<section class="estimate"><div class="estimate-head"><h3>Live rating estimate</h3><span>${plyLabel(Math.min(ply, g.estimates.length - 1))}</span></div>
+        <div class="engine-tag" title="${g.engine ? "Each move is scored by Stockfish and the model uses those scores" : "No engine: the model uses moves and clocks only"}">${g.engine ? "with Stockfish move scores" : "moves and clocks only"}</div>
         ${est("white")}${est("black")}<div class="chart" id="chart"></div></section>`
     : `<section class="estimate"><div class="no-model">No model loaded: run train.py and export_onnx.py to see rating estimates.</div></section>`;
 

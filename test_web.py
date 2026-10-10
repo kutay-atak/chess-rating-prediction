@@ -10,7 +10,7 @@ from web.server import app
 MODEL = Path(__file__).parent / "model"
 
 
-def fake_predictor(sans, clocks, base, inc):
+def fake_predictor(sans, clocks, base, inc, evals=None):
     """Stands in for the trained model so these tests don't need model/."""
     return [{"ply": t, "white": {"rating": 1500 + t, "low": 1400, "high": 1600 + t},
              "black": {"rating": 1500 - t, "low": 1400 - t, "high": 1600}} for t in range(len(sans) + 1)]
@@ -19,6 +19,20 @@ def fake_predictor(sans, clocks, base, inc):
 @pytest.fixture(autouse=True)
 def no_model(monkeypatch):
     monkeypatch.setattr(web.server, "load_predictor", lambda: fake_predictor)
+    monkeypatch.setattr(web.server, "load_engine", lambda: None)
+
+
+class FakeEngine:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def eval(self, board):
+        if self.fail:
+            raise RuntimeError("engine crashed")
+        return 25
+
+    def close(self):
+        pass
 
 WHITE, BLACK = True, False
 FOOLS_MATE = ["f2f3", "e7e5", "g2g4", "d8h4"]
@@ -177,3 +191,31 @@ def test_trained_model_gives_an_estimate_per_ply():
     for e in out:
         for side in ("white", "black"):
             assert 0 < e[side]["low"] <= e[side]["rating"] <= e[side]["high"] < 4000
+
+
+def play_local(monkeypatch, engine, ucis):
+    seen = []
+    monkeypatch.setattr(web.server, "load_engine", lambda: engine)
+    monkeypatch.setattr(web.server, "load_predictor", lambda: lambda *a: seen.append(a[4:]) or fake_predictor(*a))
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        hello(ws, "token-engine", "me")
+        ws.send_json({"type": "local", "tc": "3+0"})
+        room = ws.receive_json()["id"]
+        ws.send_json({"type": "join", "id": room})
+        next_state(ws)
+        for uci in ucis:
+            ws.send_json({"type": "move", "id": room, "uci": uci})
+        state = next_state(ws)
+        while len(state["estimates"]) < len(ucis) + 1:  # estimates follow once the evals are in
+            state = next_state(ws)
+    return state, seen
+
+
+def test_engine_evals_reach_the_model(monkeypatch):
+    state, seen = play_local(monkeypatch, FakeEngine(), ["e2e4", "e7e5"])
+    assert state["engine"] and seen[-1] == ([25, 25],)
+
+
+def test_engine_failure_falls_back_to_moves_and_clocks(monkeypatch):
+    state, seen = play_local(monkeypatch, FakeEngine(fail=True), ["e2e4"])
+    assert not state["engine"] and seen[-1] == (None,) and len(state["estimates"]) == 2

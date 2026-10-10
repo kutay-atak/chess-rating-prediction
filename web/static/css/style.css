@@ -245,6 +245,7 @@ svg.icon { width: 24px; height: 24px; fill: currentColor; flex-shrink: 0; }
 .estimate-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
 .estimate-head h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-2); }
 .estimate-head span { color: var(--muted); font-size: 12px; }
+.engine-tag { color: var(--muted); font-size: 11px; margin: -4px 0 6px; }
 .est-row { display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 8px; padding: 3px 0; }
 .est-row .swatch { width: 12px; height: 12px; border-radius: 2px; }
 .est-row .who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

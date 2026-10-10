@@ -15,9 +15,13 @@ class Predictor:
         options.intra_op_num_threads = 1
         self.session = ort.InferenceSession(str(folder / "rating_model.onnx"), options)
         self.index = vocab_index(self.meta["vocab"])
+        self.n_numeric = self.session.get_inputs()[1].shape[2]
 
-    def __call__(self, sans, clocks, base, inc):
-        """Estimates after each ply so far: [{ply, white: {rating, low, high}, black: {...}}, ...]."""
-        tokens, numeric = encode(sans, clocks, base, inc, self.index)
+    def __call__(self, sans, clocks, base, inc, evals=None):
+        """Estimates after each ply so far: [{ply, white: {rating, low, high}, black: {...}}, ...].
+
+        evals: engine eval after each ply, or None to estimate from moves and clocks alone."""
+        tokens, numeric = encode(sans, clocks, base, inc, self.index, evals)
+        numeric = numeric[:, :self.n_numeric]  # a model trained without evals takes fewer features
         raw = self.session.run(None, {"tokens": tokens[None], "numeric": numeric[None]})[0][0]
-        return to_ratings(raw, self.meta)
+        return to_ratings(raw, self.meta, has_evals=evals is not None and self.n_numeric > 9)

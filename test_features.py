@@ -1,6 +1,6 @@
 import numpy as np
 
-from features import MAX_PLIES, START, UNK, build_vocab, encode, numeric_features, time_control, to_ratings, vocab_index
+from features import MAX_PLIES, START, UNK, build_vocab, encode, numeric_features, time_control, to_ratings, vocab_index, win_chance
 
 
 def test_time_control():
@@ -15,7 +15,7 @@ def test_encode():
     index = vocab_index(["e4", "e5"])
     tokens, numeric = encode(["e4", "e5", "Qh5"], [180, 178, 175], 180, 2, index)
     assert tokens.tolist() == [START, index["e4"], index["e5"], UNK]
-    assert numeric.shape == (4, 9) and numeric.dtype == np.float32
+    assert numeric.shape == (4, 12) and numeric.dtype == np.float32
     assert numeric[0, 7] == 1 and numeric[1:, 7].sum() == 0  # start flag
     assert numeric[1:, 0].tolist() == [1, -1, 1]  # mover
     # time spent: first move per side counts from the base time; White's 2nd move 180 + 2 - 175 = 7s
@@ -36,7 +36,7 @@ def test_numeric_features_never_negative_time_spent():
 def test_to_ratings():
     raw = np.zeros((2, 5))
     raw[1] = [1, -1, np.log(0.5), 0, 0]
-    meta = {"center": 1500, "scale": 300, "calibration": [1.0, 2.0]}
+    meta = {"center": 1500, "scale": 300, "calibration": {"no_evals": [1.0, 2.0], "evals": [9.0, 9.0]}}
     out = to_ratings(raw, meta)
     assert out[0]["white"] == {"rating": 1500, "low": 1500 - 384, "high": 1500 + 384}
     assert out[1]["white"]["rating"] == 1800 and out[1]["black"]["rating"] == 1200
@@ -45,3 +45,13 @@ def test_to_ratings():
 
 def test_numeric_features_finite_with_zero_base_time():
     assert np.isfinite(numeric_features([0, 0, 3, 4], 0, 5)).all()  # 0+5 is a blitz time control
+
+
+def test_eval_features():
+    # White blunders on move 2 (+0.3 -> -3.0); Black's moves keep the eval
+    numeric = numeric_features([180, 180, 179, 178], 180, 0, evals=[30, 30, -300, -300])
+    assert numeric[:, 9].tolist() == [1, 1, 1, 1, 1]
+    lost = numeric[1:, 11]
+    assert lost[0] == 0 and lost[1] == 0 and lost[3] == 0  # first move gains on START_CP; Black loses nothing
+    np.testing.assert_allclose(lost[2], win_chance(30) - win_chance(-300), rtol=1e-5)
+    assert (numeric_features([180, 180], 180, 0)[:, 9:] == 0).all()  # no evals: features off

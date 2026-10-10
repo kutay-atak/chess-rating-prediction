@@ -7,6 +7,10 @@ a reload gets its seat back), then seeks a game (matchmaking per time control), 
 game (invite link /game/<id>) or a pass-and-play game (one client plays both sides), and joins
 games by id. After every change the server sends each client in a game the full game state,
 including the model's rating estimates after every ply so far.
+
+With Stockfish installed (on PATH, or STOCKFISH=/path), each move is scored by the engine and the
+model uses those evals; the estimate for a move arrives once its eval is in. Without Stockfish, or
+if it fails mid-game, the model runs on moves and clocks alone.
 """
 import asyncio
 import os
@@ -22,6 +26,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from web.engine import Engine, find_stockfish
 from web.game import Game
 from web.predictor import Predictor
 
@@ -49,6 +54,8 @@ class Room:
     started: bool = True
     clients: set = field(default_factory=set)
     estimates: list = field(default_factory=list)
+    evals: list | None = None  # engine eval after each ply so far; None: no engine for this game
+    analysing: bool = False
     rematch: set = field(default_factory=set)
     next_id: str | None = None
     ended_at: float | None = None
@@ -57,6 +64,7 @@ class Room:
 rooms: dict[str, Room] = {}
 seeks: dict[str, Client] = {}  # time control -> the client waiting for an opponent
 predictor = None
+engine = None
 
 
 def load_predictor():
@@ -64,17 +72,46 @@ def load_predictor():
     return Predictor(folder) if (folder / "rating_model.onnx").exists() else None
 
 
+def load_engine():
+    try:
+        return Engine() if find_stockfish() else None
+    except Exception as e:
+        print(f"Stockfish didn't start ({e}); estimating from moves and clocks only")
+        return None
+
+
 def new_room(mode, tc, seats, names):
     room = Room(id=secrets.token_urlsafe(6), mode=mode, tc=tc, game=Game(*TIME_CONTROLS[tc]),
-                seats=seats, names=names, started=all(seats.values()))
+                seats=seats, names=names, started=all(seats.values()), evals=[] if engine else None)
     update_estimates(room)
     rooms[room.id] = room
     return room
 
 
 def update_estimates(room):
-    g = room.game
-    room.estimates = predictor(g.sans, g.clocks, g.base, g.inc) if predictor else []
+    """Estimates after every ply that has what the model needs (its eval, when there's an engine)."""
+    g, n = room.game, room.game.ply if room.evals is None else len(room.evals)
+    room.estimates = predictor(g.sans[:n], g.clocks[:n], g.base, g.inc, room.evals) if predictor else []
+
+
+async def analyse(room):
+    """Score the plies that have no eval yet, in order, then refresh the estimates."""
+    if room.analysing:
+        return
+    room.analysing = True
+    try:
+        while room.evals is not None and len(room.evals) < room.game.ply:
+            board = chess.Board()
+            for uci in room.game.ucis[:len(room.evals) + 1]:
+                board.push_uci(uci)
+            try:
+                room.evals.append(await asyncio.to_thread(engine.eval, board))
+            except Exception:
+                room.evals = None  # the engine failed: this game carries on without evals
+        update_estimates(room)
+        await broadcast(room)
+    finally:
+        room.analysing = False
 
 
 def state(room, client):
@@ -94,7 +131,7 @@ def state(room, client):
         "result": g.result, "reason": g.reason, "winner": g.winner(),
         "draw_offer": COLOR[g.draw_offer] if g.draw_offer is not None else None,
         "rematch": sorted(COLOR[c] for c in room.rematch), "next_id": room.next_id,
-        "estimates": room.estimates, "model": predictor is not None,
+        "estimates": room.estimates, "model": predictor is not None, "engine": room.evals is not None,
     }
 
 
@@ -179,7 +216,10 @@ async def handle(client, msg):
         except ValueError as e:
             await send(client, {"type": "error", "message": str(e)})
             return await broadcast(room)
-        update_estimates(room)
+        if room.evals is None:
+            update_estimates(room)
+        else:
+            asyncio.create_task(analyse(room))
     elif kind == "resign":
         g.resign(color)
     elif kind == "draw":
@@ -213,11 +253,13 @@ async def ticker():
 
 @asynccontextmanager
 async def lifespan(app):
-    global predictor
-    predictor = load_predictor()
+    global predictor, engine
+    predictor, engine = load_predictor(), load_engine()
     task = asyncio.create_task(ticker())
     yield
     task.cancel()
+    if engine:
+        engine.close()
 
 
 app = FastAPI(lifespan=lifespan)

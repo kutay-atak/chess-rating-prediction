@@ -1,6 +1,6 @@
 import pandas as pd
 
-from prepare_games import parse, prepare
+from prepare_games import MATE, parse, parse_evals, prepare
 
 GAME = "1. e4 { [%clk 0:03:00] } 1... e5 { [%eval 0.2] [%clk 0:02:58.5] } 2. Qh5?! { [%clk 0:02:55] } 1-0"
 
@@ -9,6 +9,12 @@ def test_parse():
     assert parse(GAME) == (["e4", "e5", "Qh5"], [180, 178.5, 175])
     assert parse("1. e4 { [%clk 0:03:00] } 1... e5 2. Nf3 { [%clk 0:02:59] } 1-0") is None  # unclocked move
     assert parse("1. e4 e5 1/2-1/2") is None
+
+
+def test_parse_evals():
+    analysed = "1. e4 { [%eval 0.18] [%clk 0:03:00] } 1... f5 { [%eval #-3] [%clk 0:03:00] } 2. Qh5# { [%clk 0:02:59] } 1-0"
+    assert parse_evals(analysed, ["e4", "f5", "Qh5#"]) == [18, -MATE, MATE]
+    assert parse_evals(GAME, ["e4", "e5", "Qh5"]) is None  # only one move has an eval
 
 
 def test_prepare(tmp_path):
@@ -25,3 +31,4 @@ def test_prepare(tmp_path):
     assert df.TimeControl.tolist() == ["180+2"]
     assert df.moves.iloc[0] == ["e4", "e5", "Qh5"]
     assert df.clocks.iloc[0] == [180, 178.5, 175]
+    assert df.evals.iloc[0] is None
