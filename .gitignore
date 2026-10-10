@@ -1,6 +1,7 @@
 # data (downloaded shards and prepared games)
 lichess/
 games/
+sample.parquet
 
 # training checkpoints (the exported model in model/ is committed)
 checkpoints/
