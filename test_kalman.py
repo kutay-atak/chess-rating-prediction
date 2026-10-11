@@ -57,10 +57,11 @@ def test_autocorrelation_recovers_an_ar1_rho():
 
 
 def test_checkpoint_preds_take_the_sides_own_moves_among_the_first_t_plies():
-    means = np.tile(np.arange(1.0, 41.0), (2, 1))  # one game: White row 0, Black row 1; value = own moves seen
+    # one game: White row 0, Black row 1; value = own moves seen, plus 100 for Black
+    means = np.stack([np.arange(1.0, 41.0), 100 + np.arange(1.0, 41.0)])
     preds = checkpoint_preds(means, np.ones((2, 40)), np.array([7]), np.array([5]))
     at5 = preds[preds.t == 5].set_index("side")["mean"]
-    assert set(preds.t) == {2, 5} and at5["white"] == 3 and at5["black"] == 2
+    assert set(preds.t) == {2, 5} and at5["white"] == 3 and at5["black"] == 102
 
 
 def test_tc_prior_falls_back_for_rare_time_controls():

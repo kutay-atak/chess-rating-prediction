@@ -7,7 +7,7 @@ Predicts both players' Lichess blitz ratings after every move, with 90% interval
 - [x] Phase 1 — Data, stratified sample, player split (Sampling Theory)
 - [x] Phase 2 — Features, baselines, evaluation
 - [x] Phase 3 — GRU sequence model (Data Mining and Neural Networks)
-- [ ] Phase 4 — State-space filter (Advanced Time Series Analysis)
+- [x] Phase 4 — State-space filter (Advanced Time Series Analysis)
 - [ ] Phase 5 — Latent skill model (Structural Equations)
 - [ ] Phase 6 — Figures and demo app (Data Visualization in Data Science)
 
@@ -71,6 +71,35 @@ On games without evals, which is every live game, the two are equal, and the new
 
 Each version was trained once, and the new run also changed the learning-rate schedule, so differences of a point or two are within what a reseed might move.
 
+### Kalman filters
+
+`kalman.py` treats a player's rating as a constant hidden state and updates it once per own move. It is a classical model of "the estimate sharpens as evidence arrives", set against the GRU.
+- **Prior:** the time control's weighted mean rating and the variance of ratings within it.
+- **Observation per move:** z, a per-move LightGBM prediction of the mover's rating from seconds spent, clock left and ply. It was trained on 2 million random train moves and is taken as z = rating + e, as PLAN.md specifies.
+- **Noise:** var(e) per ply bin comes from val residuals: σ = 338–365 points. That is about the spread of ratings within a time control (350), so a single move says little.
+- **Errors:** `kalman_iid` assumes they are independent. `kalman_ar1` gives them AR(1) correlation between a player's consecutive moves, ρ = 0.979, estimated from val residuals. Its state is augmented with the current error.
+
+Both use model-based Gaussian intervals (mean ± 1.645 sd), so the plot below shows whether each model's own uncertainty is honest.
+
+![Coverage of the Kalman filters](results/kalman_coverage.png)
+
+| plies seen | iid MAE | iid coverage | iid interval | AR(1) MAE | AR(1) coverage | AR(1) interval | GRU MAE | GRU coverage |
+|---|---|---|---|---|---|---|---|---|
+| 2 | 285 | 0.75 | ±415 | 285 | 0.75 | ±415 | 276 | 0.90 |
+| 10 | 275 | 0.49 | ±233 | 277 | 0.74 | ±396 | 226 | 0.90 |
+| 20 | 269 | 0.38 | ±170 | 274 | 0.74 | ±389 | 207 | 0.90 |
+| 80 | 274 | 0.20 | ±90 | 273 | 0.71 | ±365 | 188 | 0.89 |
+
+**Does modelling the error correlation fix the overconfidence? Mostly.** With independent errors, every move counts as fresh evidence. So kalman_iid's interval shrinks to ±90 by ply 80 while its error stays near 270, and coverage collapses to 0.20. With AR(1) errors the interval barely shrinks, and coverage holds at 0.70–0.74.
+
+**Two things still keep it below 0.90:**
+- **The errors behave like a fixed offset per player, not like AR(1).** The residual autocorrelation is still 0.958 at lag 10, where AR(1) with ρ = 0.979 implies 0.806. So even the AR(1) filter forgets old errors too fast, and coverage drifts down from 0.74 to 0.71.
+- **Coverage is only 0.75 already at ply 2,** where both filters have seen one move and are identical. A per-move prediction is pulled toward the average rating, and so is the prior. Their errors therefore move together, while the filter treats them as independent and counts the shared part twice.
+
+Two fixes would follow, neither done here: model the error as a persistent offset plus noise, and calibrate z against the true rating (z = a + b·rating + e) instead of taking it as unbiased.
+
+On error the filters (269–285) sit near `timecontrol` and behind lgbm, far from the GRU, which reads the moves themselves rather than one move's clock use at a time.
+
 ## Limitations
 
 **Predictions are pulled toward the middle.** Here are the GRU's results at ply 80 by the player's own rating (`results/metrics_by_band.csv`):
@@ -101,6 +130,7 @@ python sample.py games
 python baselines.py
 python gru.py 20000   # quick check on 20 000 train games that the loss falls
 python gru.py
+python kalman.py
 python evaluate.py
 pytest
 ```

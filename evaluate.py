@@ -164,6 +164,7 @@ def by_band(preds, test):
 def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None, legend=False):
     fig, ax = plt.subplots(figsize=(7, 4.2), facecolor="#fcfcfb")
     ax.set_facecolor("#fcfcfb")
+    ends = []
     for model, m in metrics.groupby("model", sort=False):
         color = COLORS.get(model, "#52514e")
         ax.plot(m.t, m[column], color=color, lw=2, marker=MARKERS.get(model, "o"), ms=6, label=model)
@@ -171,9 +172,15 @@ def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None
             ax.fill_between(m.t, m[column] - 1.96 * m[band], m[column] + 1.96 * m[band], color=color, alpha=0.15, lw=0)
         if dashed:
             ax.plot(m.t, m[dashed], color=color, lw=1.5, ls="--")
-        if not legend:  # direct labels at the line ends
-            ax.annotate(model, (m.t.iloc[-1], m[column].iloc[-1]), xytext=(6, 0), textcoords="offset points",
-                        va="center", color="#0b0b0b", fontsize=9)
+        ends.append([m[column].iloc[-1], model])
+    if not legend:  # direct labels at the line ends, pushed apart where lines end close together
+        low, high = ax.get_ylim()
+        ends.sort()
+        for i in range(1, len(ends)):
+            ends[i][0] = max(ends[i][0], ends[i - 1][0] + 0.045 * (high - low))
+        for y, model in ends:
+            ax.annotate(model, (CHECKPOINTS[-1], y), xytext=(6, 0), textcoords="offset points", va="center",
+                        color="#0b0b0b", fontsize=9, annotation_clip=False)
     if line is not None:
         ax.axhline(line, color="#52514e", lw=1, ls=":")
     ax.set(xlabel="plies seen (t)", ylabel=ylabel, title=title, xticks=CHECKPOINTS)
@@ -208,7 +215,8 @@ def main():
     metrics = metrics[metrics.model.isin(COLORS)]  # other models (gru_v1, the first GRU) stay in the CSVs only
     plot(metrics, "weighted_mae", "results/mae.png", "MAE (rating points)",
          "Weighted MAE on unseen players (band: ±1.96 player-bootstrap SE)", band="se_player")
-    plot(metrics, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",
+    calibrated = metrics[~metrics.model.str.startswith("kalman")]  # the Kalman filters get their own plot below
+    plot(calibrated, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",
          "Coverage of the 90% intervals (solid: weighted, dashed: unweighted)", line=0.9, dashed="coverage",
          legend=True)  # the weighted lines all sit on 0.9, so end labels would collide
     kalman = metrics[metrics.model.isin(["gru", "kalman_iid", "kalman_ar1"])]
