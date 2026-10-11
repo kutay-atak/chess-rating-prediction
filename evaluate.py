@@ -14,7 +14,8 @@ Per model and checkpoint t:
 - weighted_coverage, interval_score: the stratified estimator applied to the share of a game's scored
   sides covered, and to the interval score (width plus 2/0.1 times any miss; lower is better)
 Per model, t and band of the side's own rating: bias, MAE, coverage and width (by_band).
-Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png and results/coverage.png.
+Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png, results/coverage.png and
+results/kalman_coverage.png (the two Kalman filters' model-based intervals, against the GRU's calibrated ones).
 
 Usage: python evaluate.py
 """
@@ -37,8 +38,9 @@ REPLICATES = 200  # player bootstrap replicates for se_player
 LEVEL = 0.9  # the intervals' nominal coverage
 BANDS = [1000, 1400, 1800, 2200]  # 400-point bands of a side's own rating: several thousand test sides each
 BAND_LABELS = ["<1000", "1000-1399", "1400-1799", "1800-2199", "2200+"]
-COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a", "gru": "#eda100"}  # validated slots 1-4
-MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^", "gru": "D"}
+COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a", "gru": "#eda100", "kalman_iid": "#e87ba4",
+          "kalman_ar1": "#008300"}  # validated categorical slots 1-6
+MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^", "gru": "D", "kalman_iid": "v", "kalman_ar1": "P"}
 
 
 def population(folder="games"):
@@ -209,6 +211,10 @@ def main():
     plot(metrics, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",
          "Coverage of the 90% intervals (solid: weighted, dashed: unweighted)", line=0.9, dashed="coverage",
          legend=True)  # the weighted lines all sit on 0.9, so end labels would collide
+    kalman = metrics[metrics.model.isin(["gru", "kalman_iid", "kalman_ar1"])]
+    if kalman.model.str.startswith("kalman").any():
+        plot(kalman, "weighted_coverage", "results/kalman_coverage.png", "share of sides inside the interval",
+             "Weighted coverage of the 90% intervals: do correlated errors explain the gap?", line=0.9)
 
 
 if __name__ == "__main__":
