@@ -53,11 +53,11 @@ Dependencies: lightgbm.
 ## Phase 3 — Sequence model (Data Mining and Neural Networks)
 Goal: a GRU that predicts both ratings after every ply, with uncertainty.
 
-- `gru.py`. Inputs per ply: SAN move embedding (vocabulary from train; rare moves map to an unknown token), log seconds spent, clock left as a share of base, side to move, base time and increment (scaled), eval and loss with a missing-value mask.
+- `gru.py`. Inputs per ply: SAN move embedding (vocabulary from train; rare moves map to an unknown token), log seconds spent, clock left as a share of base, side to move, base time and increment (scaled). No engine evals: they exist only for games someone had analysed after the game, so they reveal a later event, and a live game in the demo never has them.
 - Output per ply: mean and log-variance of White's and Black's standardised rating. Loss: Gaussian negative log-likelihood summed over plies and sides. Early stopping on validation NLL.
 - Train weighted by N_h/n_h, like the baselines: the strata are bands of the ratings being predicted, so an unweighted fit learns the sample's rating mix, not the month's.
 - First train on 20 000 games to check the loss falls, then on everything. If the CPU is too slow, use a free Colab or Kaggle GPU.
-- Save the weights to `model.pt` and keep it under 20 MB, since the demo loads it from the repo. Write preds at the checkpoints, with interval = mean ± 1.645 sd.
+- Save the weights to `model.pt` and keep it under 20 MB, since the demo loads it from the repo. Write preds at the checkpoints, with interval = mean ± q_t sd, q_t calibrated on val sides (split conformal on |error| / sd; the plain 1.645 covered only 0.89).
 
 Done when: `gru` is in `metrics.csv` and the README compares it with `lgbm` honestly, win or lose.
 

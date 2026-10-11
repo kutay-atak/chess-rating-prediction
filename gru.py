@@ -1,11 +1,12 @@
 """GRU over the plies of a game: after every ply, a mean and sd for both players' ratings.
 
 Inputs per ply (ply_inputs): the move as a SAN embedding; the mover's log seconds spent; their clock
-left as a share of base; who moved; base and increment; the eval after the ply and the mover's loss,
-each with a missing flag. Output per ply: mean and log-variance of White's and Black's standardised
-rating. Loss: Gaussian negative log-likelihood, weighted by N_h/n_h like every fit in baselines.py
-(the strata are bands of the very ratings being predicted). Early stopping on the weighted val NLL.
-Intervals: mean ± 1.645 sd.
+left as a share of base; who moved; base and increment. No engine evals: Lichess has them only for
+games someone had analysed after they ended, so they reveal a later event and never exist in a live game.
+Output per ply: mean and log-variance of White's and Black's standardised rating. Loss: Gaussian
+negative log-likelihood, weighted by N_h/n_h like every fit in baselines.py (the strata are bands of
+the very ratings being predicted). Early stopping on the weighted val NLL. Intervals: split conformal
+on val sides, scaled by the model's own sd (conformal()).
 
 Usage: python gru.py [n_train_games]   (reads sample.parquet; writes model.pt and results/preds_gru.parquet)
 """
@@ -18,35 +19,33 @@ import numpy as np
 import pandas as pd
 import torch
 
+from baselines import weighted_quantile
 from features import CHECKPOINTS, own_moves
 
-N_INPUTS = 9
+N_INPUTS = 5
 MAX_PLIES = 200  # 99.9% of games are shorter; the rest would only add padding
 MIN_COUNT = 20  # rarer moves get noisy embeddings, so they share the unknown token
 PAD, UNK = 0, 1
 BATCH = 256
 LR = 2e-3  # only a few epochs fit in the 30-minute budget, so a step above Adam's default 1e-3
-MAX_EPOCHS = 6  # from the 20k-game run's timing: the full run must stay under 30 minutes
+MAX_EPOCHS = 7  # about 2.5 min each on 4 CPUs: the full run must stay under 30 minutes
 PATIENCE = 2
-Z = 1.645  # 90% Gaussian interval
-COLUMNS = ["game_id", "WhiteElo", "BlackElo", "TimeControl", "moves", "clocks", "evals", "weight", "split",
+CLIP = 500.0  # safety net only: on 20k train games the gradient norm had a 99th percentile of 356
+LEVEL = 0.9  # 90% intervals
+COLUMNS = ["game_id", "WhiteElo", "BlackElo", "TimeControl", "moves", "clocks", "weight", "split",
            "score_white", "score_black"]
 
 
-def ply_inputs(clocks, evals, base, inc):
+def ply_inputs(clocks, base, inc):
     """[plies, N_INPUTS] float32; row i describes ply i and its mover (conventions in CLAUDE.md)."""
-    clocks, evals = np.asarray(clocks, dtype=float), np.asarray(evals, dtype=float)
+    clocks = np.asarray(clocks, dtype=float)
     x = np.zeros((len(clocks), N_INPUTS), dtype=np.float32)
     for side in (0, 1):
-        spent, loss, left, _ = own_moves(clocks, evals, base, inc, side)
+        spent, _, left, _ = own_moves(clocks, np.full(len(clocks), np.nan), base, inc, side)
         x[side::2, 0] = np.log1p(spent)  # log1p: 0-second moves are common
         x[side::2, 1] = np.clip(left / (base if base > 0 else 40 * inc), 0, 2)  # 0+N games: Lichess's 40-move estimate
         x[side::2, 2] = side
-        x[side::2, 7] = np.nan_to_num(loss) / 10
-        x[side::2, 8] = np.isnan(loss)  # White's first move, and moves next to a missing eval
     x[:, 3], x[:, 4] = base / 180, inc / 5  # scaled to about 1
-    x[:, 5] = np.nan_to_num(evals) / 10  # evals are clipped to ±10 pawns
-    x[:, 6] = np.isnan(evals)
     return x
 
 
@@ -65,11 +64,11 @@ def load(games, index):
     lengths = np.minimum(games.moves.map(len).to_numpy(), MAX_PLIES)
     offsets = np.concatenate([[0], np.cumsum(lengths)])
     moves, x = np.empty(offsets[-1], dtype=np.int32), np.empty((offsets[-1], N_INPUTS), dtype=np.float32)
-    for i, g in enumerate(games[["moves", "clocks", "evals", "TimeControl"]].itertuples(index=False)):
+    for i, g in enumerate(games[["moves", "clocks", "TimeControl"]].itertuples(index=False)):
         base, inc = map(int, g.TimeControl.split("+"))
         a, b = offsets[i], offsets[i + 1]
         moves[a:b] = encode(g.moves[:b - a], index)
-        x[a:b] = ply_inputs(g.clocks[:b - a], g.evals[:b - a], base, inc)
+        x[a:b] = ply_inputs(g.clocks[:b - a], base, inc)
     return moves, x, offsets
 
 
@@ -128,13 +127,14 @@ def run(model, data, chunks, y, scored, w, opt=None):
         if opt is not None:
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
             opt.step()
         total, games = total + loss.item() * len(idx), games + len(idx)
     return total / games
 
 
 def predict(model, data, idx, game_ids, m, sd):
-    """Preds rows (game_id, side, t, mean, lo, hi) at every checkpoint t each game in idx reaches."""
+    """Rows (game_id, side, t, mean, sd) in rating points at every checkpoint t each game in idx reaches."""
     out = []
     with torch.no_grad():
         for b in batches(np.diff(data[2])[idx]):
@@ -145,11 +145,28 @@ def predict(model, data, idx, game_ids, m, sd):
                 if not ok.any():
                     break  # no game in this batch reaches t, nor any later checkpoint
                 mu = mean[ok, t - 1].numpy() * sd + m  # the output after ply t sits at index t - 1
-                half = Z * np.exp(logvar[ok, t - 1].numpy() / 2) * sd
+                s = np.exp(logvar[ok, t - 1].numpy() / 2) * sd
                 for side, name in enumerate(("white", "black")):
-                    out.append(pd.DataFrame({"game_id": game_ids[idx[b][ok]], "side": name, "t": t, "mean": mu[:, side],
-                                             "lo": mu[:, side] - half[:, side], "hi": mu[:, side] + half[:, side]}))
+                    out.append(pd.DataFrame({"game_id": game_ids[idx[b][ok]], "side": name, "t": t,
+                                             "mean": mu[:, side], "sd": s[:, side]}))
     return pd.concat(out, ignore_index=True)
+
+
+def sides(games):
+    """One row per side of each game: game_id, side, rating, scored, weight."""
+    return pd.concat([pd.DataFrame({"game_id": games.game_id, "side": name, "rating": games[f"{name.title()}Elo"],
+                                    "scored": games[f"score_{name}"], "weight": games.weight})
+                      for name in ("white", "black")], ignore_index=True)
+
+
+def conformal(preds, truth, level=LEVEL):
+    """{t: q}: the weighted `level` quantile of |rating - mean| / sd over scored val sides at t, so that
+    mean ± q·sd covers `level` of the month's sides. Scaled by the model's sd, so intervals stay wider
+    where it is less sure; calibrated, because the Gaussian ±1.645 sd covered only 0.89."""
+    d = preds.merge(truth[truth.scored], on=["game_id", "side"])
+    score = ((d.rating - d["mean"]).abs() / d.sd).to_numpy()
+    return {int(t): float(weighted_quantile(score[d.t == t], d.weight[d.t == t].to_numpy(), level))
+            for t in sorted(d.t.unique())}
 
 
 def main(limit=None):
@@ -180,12 +197,14 @@ def main(limit=None):
 
     model = GRU(len(words) + 2)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
+    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(opt, MAX_EPOCHS, eta_min=LR / 20)  # big steps, then fine ones
     val_chunks = [val[b] for b in batches(lengths[val])]
     best, bad = np.inf, 0
     for epoch in range(1, MAX_EPOCHS + 1):
         start = time.time()
         train_nll = run(model, data, [train[b] for b in batches(lengths[train], rng)], y, scored, w, opt)
         val_nll = run(model, data, val_chunks, y, scored, w)
+        schedule.step()
         print(f"epoch {epoch}: train NLL {train_nll:.2f}, val NLL {val_nll:.2f} per game "
               f"({(time.time() - start) / 60:.1f} min)", flush=True)
         if val_nll < best:
@@ -195,12 +214,18 @@ def main(limit=None):
             if bad == PATIENCE:
                 break
     model.load_state_dict(state)
-    torch.save({"state_dict": state, "vocab": words, "rating_mean": float(m), "rating_sd": float(sd)}, "model.pt")
+    game_ids = games.game_id.to_numpy()
+    q = conformal(predict(model, data, val, game_ids, m, sd), sides(games))
+    torch.save({"state_dict": state, "vocab": words, "rating_mean": float(m), "rating_sd": float(sd),
+                "conformal": q}, "model.pt")
 
     os.makedirs("results", exist_ok=True)
-    preds = predict(model, data, test, games.game_id.to_numpy(), m, sd)
+    preds = predict(model, data, test, game_ids, m, sd)
+    half = preds.t.map(q) * preds.sd
+    preds = preds.assign(lo=preds["mean"] - half, hi=preds["mean"] + half).drop(columns="sd")
     preds.to_parquet("results/preds_gru.parquet", index=False)
-    print(f"best val NLL {best:.2f}; {len(preds):,} test rows -> results/preds_gru.parquet", flush=True)
+    print(f"best val NLL {best:.2f}; conformal multipliers {q}; {len(preds):,} test rows -> results/preds_gru.parquet",
+          flush=True)
 
 
 if __name__ == "__main__":

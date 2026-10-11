@@ -7,8 +7,14 @@ Per model and checkpoint t:
   that reach t plies; variance with finite-population correction
 - se_player: the same estimate's SE from resampling whole test players within strata, since one
   player's errors move together and `se` treats every game as independent
-- weighted_coverage: the stratified estimator applied to the share of a game's scored sides covered
-Writes results/metrics.csv, results/mae.png and results/coverage.png.
+- se_shard: the same estimate's SE from deleting one downloaded shard at a time (jackknife), since the
+  12 shards are a random sample of the month's and games in a shard share its hours of play
+- weighted_mae_80: the same estimator over games that reach ply 80 only, so the curve follows the same
+  games at every t and shows the gain from more plies alone
+- weighted_coverage, interval_score: the stratified estimator applied to the share of a game's scored
+  sides covered, and to the interval score (width plus 2/0.1 times any miss; lower is better)
+Per model, t and band of the side's own rating: bias, MAE, coverage and width (by_band).
+Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png and results/coverage.png.
 
 Usage: python evaluate.py
 """
@@ -28,19 +34,24 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 REPLICATES = 200  # player bootstrap replicates for se_player
+LEVEL = 0.9  # the intervals' nominal coverage
+BANDS = [1000, 1400, 1800, 2200]  # 400-point bands of a side's own rating: several thousand test sides each
+BAND_LABELS = ["<1000", "1000-1399", "1400-1799", "1800-2199", "2200+"]
 COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a", "gru": "#eda100"}  # validated slots 1-4
 MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^", "gru": "D"}
 
 
 def population(folder="games"):
-    """N_h(t): games in `folder` per stratum (rows) that reach each checkpoint (columns)."""
-    counts = np.zeros((len(LABELS), len(CHECKPOINTS)))
-    for path in sorted(glob.glob(f"{folder}/part-*.parquet")):
+    """N_h(t) per shard: games in each part of `folder` (axis 0, the `shard` of sample.py) per stratum
+    (axis 1) that reach each checkpoint (axis 2)."""
+    paths = sorted(glob.glob(f"{folder}/part-*.parquet"))
+    counts = np.zeros((len(paths), len(LABELS), len(CHECKPOINTS)))
+    for i, path in enumerate(paths):
         table = pq.read_table(path, columns=["WhiteElo", "BlackElo", "moves"])
         h = stratum(table["WhiteElo"].to_numpy(), table["BlackElo"].to_numpy())
         plies = pc.list_value_length(table["moves"]).to_numpy()
         for j, t in enumerate(CHECKPOINTS):
-            counts[:, j] += np.bincount(h[plies >= t], minlength=len(LABELS))
+            counts[i, :, j] = np.bincount(h[plies >= t], minlength=len(LABELS))
     return counts
 
 
@@ -80,10 +91,19 @@ def player_bootstrap(err, game, player, h, N, replicates=REPLICATES, seed=0):
     return reps.std(ddof=1)
 
 
+def shard_jackknife(y, h, shard, N_shard):
+    """SE of the stratified mean of y from deleting one shard at a time (JK1): both its test games and its
+    games in N. N_shard[i, k]: population units of stratum k in shard i."""
+    S = len(N_shard)
+    est = np.array([stratified(y[shard != i], h[shard != i], N_shard.sum(0) - N_shard[i], np.zeros(N_shard.shape[1]))[0]
+                    for i in range(S)])
+    return np.sqrt((S - 1) / S * ((est - est.mean()) ** 2).sum())
+
+
 def truth():
-    """Scored test sides: game_id, side, rating, player, stratum index, plies."""
+    """Scored test sides: game_id, side, rating, player, stratum index, shard, plies, weight."""
     s = pd.read_parquet("sample.parquet", columns=["game_id", "White", "Black", "WhiteElo", "BlackElo", "split",
-                                                   "score_white", "score_black", "moves"])
+                                                   "score_white", "score_black", "moves", "shard", "weight"])
     s["h"] = stratum(s.WhiteElo, s.BlackElo)
     s["plies"] = s.moves.map(len)
     sides = [s.assign(side=c, rating=s[f"{c.title()}Elo"], player=s[c.title()].str.lower(), scored=s[f"score_{c}"])
@@ -91,25 +111,52 @@ def truth():
     sides = pd.concat(sides)
     test = sides[(sides.split == "test") & sides.scored]
     n_all = np.array([[((s.h == k) & (s.plies >= t)).sum() for t in CHECKPOINTS] for k in range(len(LABELS))])
-    return test[["game_id", "side", "rating", "player", "h"]], n_all
+    return test[["game_id", "side", "rating", "player", "h", "shard", "plies", "weight"]], n_all
 
 
-def score(preds, test, N, n_all):
+def interval_score(lo, hi, y, level=LEVEL):
+    """Width plus 2/alpha times the miss (Gneiting and Raftery 2007): rewards narrow intervals only if they still cover."""
+    return hi - lo + 2 / (1 - level) * (np.maximum(lo - y, 0) + np.maximum(y - hi, 0))
+
+
+def score(preds, test, N_shard, n_all):
+    N = N_shard.sum(0)
     rows = []
     d = preds.merge(test, on=["game_id", "side"])
     for j, t in enumerate(CHECKPOINTS):
         x = d[d.t == t]
         err = (x.rating - x["mean"]).abs().to_numpy()
         covered = ((x.lo <= x.rating) & (x.rating <= x.hi)).to_numpy().astype(float)
-        games = pd.DataFrame({"game_id": x.game_id.to_numpy(), "h": x.h.to_numpy(), "err": err, "covered": covered})
-        per_game = games.groupby("game_id").agg(h=("h", "first"), err=("err", "mean"), covered=("covered", "mean"))
-        h = per_game.h.to_numpy()
-        wmae, se = stratified(per_game.err.to_numpy(), h, N[:, j], n_all[:, j])
-        wcov, _ = stratified(per_game.covered.to_numpy(), h, N[:, j], n_all[:, j])
-        rows.append(dict(t=t, mae=err.mean(), weighted_mae=wmae, se=se,
-                         se_player=player_bootstrap(err, x.game_id.to_numpy(), x.player.to_numpy(), x.h.to_numpy(), N[:, j]),
-                         coverage=covered.mean(), weighted_coverage=wcov, width=(x.hi - x.lo).mean(), n=len(x)))
+        games = pd.DataFrame({"game_id": x.game_id.to_numpy(), "h": x.h.to_numpy(), "shard": x.shard.to_numpy(),
+                              "plies": x.plies.to_numpy(), "err": err, "covered": covered,
+                              "iscore": interval_score(x.lo, x.hi, x.rating).to_numpy()})
+        g = games.groupby("game_id").agg(h=("h", "first"), shard=("shard", "first"), plies=("plies", "first"),
+                                         err=("err", "mean"), covered=("covered", "mean"), iscore=("iscore", "mean"))
+        h = g.h.to_numpy()
+        wmae, se = stratified(g.err.to_numpy(), h, N[:, j], n_all[:, j])
+        long = g.plies.to_numpy() >= CHECKPOINTS[-1]
+        rows.append(dict(
+            t=t, mae=err.mean(), weighted_mae=wmae, se=se,
+            se_player=player_bootstrap(err, x.game_id.to_numpy(), x.player.to_numpy(), x.h.to_numpy(), N[:, j]),
+            se_shard=shard_jackknife(g.err.to_numpy(), h, g.shard.to_numpy(), N_shard[:, :, j]),
+            weighted_mae_80=stratified(g.err.to_numpy()[long], h[long], N[:, -1], n_all[:, -1])[0],
+            coverage=covered.mean(), weighted_coverage=stratified(g.covered.to_numpy(), h, N[:, j], n_all[:, j])[0],
+            width=(x.hi - x.lo).mean(), interval_score=stratified(g.iscore.to_numpy(), h, N[:, j], n_all[:, j])[0],
+            n=len(x)))
     return pd.DataFrame(rows)
+
+
+def by_band(preds, test):
+    """Per t and band of the side's own rating: n, bias (mean - rating), MAE, coverage and width. Each is a
+    mean weighted by the game weight N_h/n_h, so a band is summarised as it is in the month, not as sampled."""
+    d = preds.merge(test, on=["game_id", "side"])
+    d["band"] = pd.Categorical(np.array(BAND_LABELS)[np.searchsorted(BANDS, d.rating, side="right")], BAND_LABELS)
+    d["bias"] = d["mean"] - d.rating
+    d["mae"], d["coverage"], d["width"] = d.bias.abs(), (d.lo <= d.rating) & (d.rating <= d.hi), d.hi - d.lo
+    cols = ["bias", "mae", "coverage", "width"]
+    return d.groupby(["t", "band"], observed=True).apply(
+        lambda g: pd.Series({"n": len(g), **{c: np.average(g[c], weights=g.weight) for c in cols}}),
+        include_groups=False).reset_index()
 
 
 def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None, legend=False):
@@ -140,18 +187,23 @@ def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None
 
 
 def main():
-    N = population()
+    N_shard = population()
     test, n_all = truth()
-    parts = []
+    parts, bands = [], []
     for path in sorted(glob.glob("results/preds_*.parquet")):
         model = os.path.basename(path)[len("preds_"):-len(".parquet")]
-        parts.append(score(pd.read_parquet(path), test, N, n_all).assign(model=model))
+        preds = pd.read_parquet(path)
+        parts.append(score(preds, test, N_shard, n_all).assign(model=model))
+        bands.append(by_band(preds, test).assign(model=model))
         print(f"scored {model}", flush=True)
     order = [m for m in COLORS if any(p.model.iloc[0] == m for p in parts)]
-    metrics = pd.concat(parts)
-    metrics = metrics.set_index("model").loc[order + sorted(set(metrics.model) - set(order))].reset_index()
+    order += sorted({p.model.iloc[0] for p in parts} - set(order))
+    metrics = pd.concat(parts).set_index("model").loc[order].reset_index()
     metrics.to_csv("results/metrics.csv", index=False, float_format="%.4f")
     print(metrics.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    bands = pd.concat(bands).set_index("model").loc[order].reset_index()
+    bands.to_csv("results/metrics_by_band.csv", index=False, float_format="%.4f")
+    metrics = metrics[metrics.model.isin(COLORS)]  # other models (gru_v1, the first GRU) stay in the CSVs only
     plot(metrics, "weighted_mae", "results/mae.png", "MAE (rating points)",
          "Weighted MAE on unseen players (band: ±1.96 player-bootstrap SE)", band="se_player")
     plot(metrics, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",

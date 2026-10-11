@@ -63,6 +63,7 @@ def main(folder):
     parts = [pq.read_table(path).take(row[drawn[shard[drawn] == i]]).to_pandas() for i, path in enumerate(shards)]
     sample = pd.concat(parts, ignore_index=True)  # same order as `drawn`: by shard, then by row
     sample.insert(0, "game_id", np.arange(len(sample)))
+    sample["shard"] = shard[drawn]  # games/ part = downloaded shard, the cluster in the shard-level SE (evaluate.py)
     sample["stratum"] = np.array(LABELS)[strata[drawn]]
     sample["weight"] = weight[strata[drawn]]
     sample["split"], sample["score_white"], sample["score_black"] = score_sides(sample.White, sample.Black)

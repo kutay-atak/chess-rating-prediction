@@ -9,6 +9,7 @@ import numpy as np
 from huggingface_hub import hf_hub_download, list_repo_files
 
 REPO, MONTH, N_SHARDS = "Lichess/standard-chess-games", "data/year=2025/month=09/", 12
+REVISION = "de4e636eddf568a9394cc01fb0b9e1da04a6babf"  # the dataset commit the 12 shards came from, so reruns get the same files
 
 
 def pick(files, n=N_SHARDS, seed=0):
@@ -17,5 +18,5 @@ def pick(files, n=N_SHARDS, seed=0):
 
 
 if __name__ == "__main__":
-    for shard in pick(list_repo_files(REPO, repo_type="dataset")):
-        print(hf_hub_download(REPO, shard, repo_type="dataset", local_dir="lichess"), flush=True)
+    for shard in pick(list_repo_files(REPO, repo_type="dataset", revision=REVISION)):
+        print(hf_hub_download(REPO, shard, repo_type="dataset", revision=REVISION, local_dir="lichess"), flush=True)
