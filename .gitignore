@@ -1,9 +1,8 @@
 # data (downloaded shards and prepared games)
 lichess/
 games/
-
-# training checkpoints (the exported model in model/ is committed)
-checkpoints/
+sample.parquet
+results/preds_*.parquet
 
 __pycache__/
 .pytest_cache/
