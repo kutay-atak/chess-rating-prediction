@@ -1,124 +1,161 @@
-"""Calibrate the exported model's intervals on val games, then score it against baselines on test games.
+"""Score every results/preds_<model>.parquet the same way, on scored test sides.
 
-Runs the ONNX model the website serves (model/rating_model.onnx), not the torch checkpoint.
-1. Val: per ply bucket, scale the predicted sigmas so that 80% intervals hold 80% of true ratings;
-   the scales are written into model/meta.json.
-2. Test (players never seen in training): MAE per player vs ply for the model and two baselines
-   (global mean rating; mean rating per time control), interval coverage and width vs ply.
-Writes reports/metrics.json and reports/mae_by_ply.png.
+Per model and checkpoint t:
+- mae, coverage of the 90% interval, width (mean hi - lo), n: plain averages over scored test sides
+- weighted_mae and se: the stratified estimator of the month's MAE. Unit = test game, y = mean absolute
+  error over its scored sides; stratum weights W_h = N_h(t)/N(t), N_h(t) = games in games/ of stratum h
+  that reach t plies; variance with finite-population correction
+- se_player: the same estimate's SE from resampling whole test players within strata, since one
+  player's errors move together and `se` treats every game as independent
+- weighted_coverage: the stratified estimator applied to the share of a game's scored sides covered
+Writes results/metrics.csv, results/mae.png and results/coverage.png.
 
-Usage: python evaluate.py games [--val-games 50000] [--test-games 100000]
+Usage: python evaluate.py
 """
-import argparse
-import json
+import glob
 import os
 
 import matplotlib
 import numpy as np
-import onnxruntime as ort
+import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
-from export_onnx import META, ONNX
-from features import MAX_PLIES, Z80, split_outputs, vocab_index
-from train import Encoded, batches, load_games
+from features import CHECKPOINTS
+from sample import LABELS, stratum
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-BUCKETS = [0, 1, 11, 21, 41, 61, 101, MAX_PLIES + 1]  # ply bucket edges for calibration
-REPORT_PLIES = [0, 5, 10, 20, 30, 40, 60, 80, 100]
+REPLICATES = 200  # player bootstrap replicates for se_player
+COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a"}  # validated categorical slots 1-3
+MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^"}
 
 
-def predict(session, data):
-    """Raw outputs for every token of `data`, flat and aligned with data.tokens: [n_tokens, 5]."""
-    out = np.zeros((len(data.tokens), 5), dtype=np.float32)
-    for ids in batches(data.lengths, 32_768):
-        tokens, numeric, _ = data.batch(ids)
-        raw = session.run(None, {"tokens": tokens.numpy(), "numeric": numeric.numpy()})[0]
-        for row, i in enumerate(ids):
-            out[data.offsets[i]:data.offsets[i + 1]] = raw[row, :data.lengths[i]]
-    return out
+def population(folder="games"):
+    """N_h(t): games in `folder` per stratum (rows) that reach each checkpoint (columns)."""
+    counts = np.zeros((len(LABELS), len(CHECKPOINTS)))
+    for path in sorted(glob.glob(f"{folder}/part-*.parquet")):
+        table = pq.read_table(path, columns=["WhiteElo", "BlackElo", "moves"])
+        h = stratum(table["WhiteElo"].to_numpy(), table["BlackElo"].to_numpy())
+        plies = pc.list_value_length(table["moves"]).to_numpy()
+        for j, t in enumerate(CHECKPOINTS):
+            counts[:, j] += np.bincount(h[plies >= t], minlength=len(LABELS))
+    return counts
 
 
-def per_token(data, raw, meta):
-    """Flat per-token arrays: ply, true ratings [n, 2], predicted means [n, 2], sigmas [n, 2]."""
-    ply = np.concatenate([np.arange(n) for n in data.lengths])
-    truth = np.repeat(data.ratings, data.lengths, axis=0)
-    mu_w, mu_b, sd_w, sd_b, _ = split_outputs(raw, meta["center"], meta["scale"])
-    return ply, truth, np.stack([mu_w, mu_b], 1), np.stack([sd_w, sd_b], 1)
+def stratified(y, h, N, n_all):
+    """Stratified mean of unit values y (stratum h) and its SE with finite-population correction.
+
+    N[k]: population units in stratum k; n_all[k]: sampled units of any split. The test games are a domain
+    of the stratified sample, so the sampling fraction in the FPC is the whole sample's, n_all/N. Strata
+    without test units are left out and the weights renormalised."""
+    present = np.array([np.any(h == k) for k in range(len(N))])
+    W = np.where(present, N, 0) / np.where(present, N, 0).sum()
+    est = var = 0.0
+    for k in np.flatnonzero(present):
+        yk = y[h == k]
+        est += W[k] * yk.mean()
+        if len(yk) > 1:
+            var += W[k] ** 2 * (1 - n_all[k] / N[k]) * yk.var(ddof=1) / len(yk)
+    return est, np.sqrt(var)
 
 
-def calibrate(ply, truth, mu, sd):
-    """Per-ply sigma scales (length MAX_PLIES + 1) so central 80% intervals cover 80% per bucket."""
-    z = np.abs(truth - mu) / sd
-    scales = np.ones(MAX_PLIES + 1)
-    for lo, hi in zip(BUCKETS[:-1], BUCKETS[1:]):
-        inside = (ply >= lo) & (ply < hi)
-        if inside.any():
-            scales[lo:hi] = np.quantile(z[inside], 0.8) / Z80
-    return scales
+def player_bootstrap(err, game, player, h, N, replicates=REPLICATES, seed=0):
+    """SE of the stratified MAE when whole players are resampled within strata.
+
+    Each scored side carries err/m and 1/m, m = scored sides in its game, so a stratum's mean of the
+    per-game errors is sum(err/m) / sum(1/m) and a game still counts once."""
+    m = pd.Series(game).map(pd.Series(game).value_counts()).to_numpy()
+    present = np.array([np.any(h == k) for k in range(len(N))])
+    W = np.where(present, N, 0) / np.where(present, N, 0).sum()
+    rng = np.random.default_rng(seed)
+    reps = np.zeros(replicates)
+    for k in np.flatnonzero(present):
+        sel = h == k
+        codes, _ = pd.factorize(player[sel])
+        num, den = np.bincount(codes, err[sel] / m[sel]), np.bincount(codes, 1 / m[sel])
+        draw = rng.integers(0, len(num), size=(replicates, len(num)))
+        reps += W[k] * num[draw].sum(axis=1) / den[draw].sum(axis=1)
+    return reps.std(ddof=1)
+
+
+def truth():
+    """Scored test sides: game_id, side, rating, player, stratum index, plies."""
+    s = pd.read_parquet("sample.parquet", columns=["game_id", "White", "Black", "WhiteElo", "BlackElo", "split",
+                                                   "score_white", "score_black", "moves"])
+    s["h"] = stratum(s.WhiteElo, s.BlackElo)
+    s["plies"] = s.moves.map(len)
+    sides = [s.assign(side=c, rating=s[f"{c.title()}Elo"], player=s[c.title()].str.lower(), scored=s[f"score_{c}"])
+             for c in ("white", "black")]
+    sides = pd.concat(sides)
+    test = sides[(sides.split == "test") & sides.scored]
+    n_all = np.array([[((s.h == k) & (s.plies >= t)).sum() for t in CHECKPOINTS] for k in range(len(LABELS))])
+    return test[["game_id", "side", "rating", "player", "h"]], n_all
+
+
+def score(preds, test, N, n_all):
+    rows = []
+    d = preds.merge(test, on=["game_id", "side"])
+    for j, t in enumerate(CHECKPOINTS):
+        x = d[d.t == t]
+        err = (x.rating - x["mean"]).abs().to_numpy()
+        covered = ((x.lo <= x.rating) & (x.rating <= x.hi)).to_numpy().astype(float)
+        games = pd.DataFrame({"game_id": x.game_id.to_numpy(), "h": x.h.to_numpy(), "err": err, "covered": covered})
+        per_game = games.groupby("game_id").agg(h=("h", "first"), err=("err", "mean"), covered=("covered", "mean"))
+        h = per_game.h.to_numpy()
+        wmae, se = stratified(per_game.err.to_numpy(), h, N[:, j], n_all[:, j])
+        wcov, _ = stratified(per_game.covered.to_numpy(), h, N[:, j], n_all[:, j])
+        rows.append(dict(t=t, mae=err.mean(), weighted_mae=wmae, se=se,
+                         se_player=player_bootstrap(err, x.game_id.to_numpy(), x.player.to_numpy(), x.h.to_numpy(), N[:, j]),
+                         coverage=covered.mean(), weighted_coverage=wcov, width=(x.hi - x.lo).mean(), n=len(x)))
+    return pd.DataFrame(rows)
+
+
+def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None, legend=False):
+    fig, ax = plt.subplots(figsize=(7, 4.2), facecolor="#fcfcfb")
+    ax.set_facecolor("#fcfcfb")
+    for model, m in metrics.groupby("model", sort=False):
+        color = COLORS.get(model, "#52514e")
+        ax.plot(m.t, m[column], color=color, lw=2, marker=MARKERS.get(model, "o"), ms=6, label=model)
+        if band:
+            ax.fill_between(m.t, m[column] - 1.96 * m[band], m[column] + 1.96 * m[band], color=color, alpha=0.15, lw=0)
+        if dashed:
+            ax.plot(m.t, m[dashed], color=color, lw=1.5, ls="--")
+        if not legend:  # direct labels at the line ends
+            ax.annotate(model, (m.t.iloc[-1], m[column].iloc[-1]), xytext=(6, 0), textcoords="offset points",
+                        va="center", color="#0b0b0b", fontsize=9)
+    if line is not None:
+        ax.axhline(line, color="#52514e", lw=1, ls=":")
+    ax.set(xlabel="plies seen (t)", ylabel=ylabel, title=title, xticks=CHECKPOINTS)
+    ax.grid(axis="y", color="#e4e3df", lw=0.8)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    if legend:
+        ax.legend(frameon=False, loc="best")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("games", help="folder of prepared parquet games")
-    ap.add_argument("--val-games", type=int, default=50_000)
-    ap.add_argument("--test-games", type=int, default=100_000)
-    ap.add_argument("--train-games", type=int, default=200_000, help="games for the time-control baseline")
-    args = ap.parse_args()
-
-    meta = json.load(open(META))
-    session = ort.InferenceSession(ONNX)
-    index = vocab_index(meta["vocab"])
-
-    val = Encoded(load_games(args.games, "val", args.val_games, seed=1), index)
-    scales = calibrate(*per_token(val, predict(session, val), meta))
-    meta["calibration"] = scales.tolist()
-    with open(META, "w") as f:
-        json.dump(meta, f)
-
-    train_df = load_games(args.games, "train", args.train_games, seed=1)
-    tc_mean = (train_df.groupby("TimeControl")[["WhiteElo", "BlackElo"]].mean().mean(axis=1)).to_dict()
-    del train_df
-
-    test = Encoded(load_games(args.games, "test", args.test_games, seed=1), index)
-    ply, truth, mu, sd = per_token(test, predict(session, test), meta)
-    half = Z80 * scales[ply][:, None] * sd
-    tc_pred = np.repeat([tc_mean.get(tc, meta["center"]) for tc in test.time_control], test.lengths)[:, None]
-    err = {"model": np.abs(truth - mu), "mean rating": np.abs(truth - meta["center"]),
-           "mean per time control": np.abs(truth - tc_pred)}
-    covered = np.abs(truth - mu) <= half
-    last = np.cumsum(test.lengths) - 1  # each game's final position
-
-    def row(sel):
-        return {**{name: round(float(e[sel].mean()), 1) for name, e in err.items()},
-                "coverage_80": round(float(covered[sel].mean()), 3),
-                "interval_width": round(float(2 * half[sel].mean()), 1), "games": int(sel.sum())}
-
-    metrics = {"test_games": len(test), "test_players_unseen_in_training": True,
-               "mae_by_ply": {str(p): row(ply == p) for p in REPORT_PLIES if (ply == p).any()},
-               "end_of_game": row(np.isin(np.arange(len(ply)), last)),
-               "calibration_scales": {f"{lo}-{hi - 1}": round(float(scales[lo]), 3) for lo, hi in zip(BUCKETS[:-1], BUCKETS[1:])}}
-    os.makedirs("reports", exist_ok=True)
-    with open("reports/metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(json.dumps(metrics, indent=2))
-
-    plies = np.arange(0, 121)
-    has = [(ply == p).any() for p in plies]
-    plies = plies[has]
-    fig, (a, b) = plt.subplots(1, 2, figsize=(12, 4.5))
-    for name, e in err.items():
-        a.plot(plies, [e[ply == p].mean() for p in plies], label=name)
-    a.set(xlabel="half-moves played", ylabel="mean absolute error (rating points)", title="Rating error, test players")
-    a.legend()
-    b.plot(plies, [2 * half[ply == p].mean() for p in plies], label="80% interval width")
-    b.set(xlabel="half-moves played", ylabel="rating points", title="Interval width (coverage on right axis)")
-    c = b.twinx()
-    c.plot(plies, [covered[ply == p].mean() for p in plies], color="C3", label="coverage")
-    c.axhline(0.8, color="C3", ls=":")
-    c.set(ylim=(0.5, 1), ylabel="coverage")
-    fig.tight_layout()
-    fig.savefig("reports/mae_by_ply.png", dpi=120)
+    N = population()
+    test, n_all = truth()
+    parts = []
+    for path in sorted(glob.glob("results/preds_*.parquet")):
+        model = os.path.basename(path)[len("preds_"):-len(".parquet")]
+        parts.append(score(pd.read_parquet(path), test, N, n_all).assign(model=model))
+        print(f"scored {model}", flush=True)
+    order = [m for m in COLORS if any(p.model.iloc[0] == m for p in parts)]
+    metrics = pd.concat(parts)
+    metrics = metrics.set_index("model").loc[order + sorted(set(metrics.model) - set(order))].reset_index()
+    metrics.to_csv("results/metrics.csv", index=False, float_format="%.4f")
+    print(metrics.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    plot(metrics, "weighted_mae", "results/mae.png", "MAE (rating points)",
+         "Weighted MAE on unseen players (band: ±1.96 player-bootstrap SE)", band="se_player")
+    plot(metrics, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",
+         "Coverage of the 90% intervals (solid: weighted, dashed: unweighted)", line=0.9, dashed="coverage",
+         legend=True)  # the weighted lines all sit on 0.9, so end labels would collide
 
 
 if __name__ == "__main__":

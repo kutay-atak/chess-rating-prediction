@@ -4,9 +4,5 @@ matplotlib
 pytest
 huggingface_hub
 torch
-onnx
-onnxruntime
 chess
-fastapi
-uvicorn[standard]
-httpx
+lightgbm

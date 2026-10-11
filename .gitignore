@@ -2,9 +2,7 @@
 lichess/
 games/
 sample.parquet
-
-# training checkpoints (the exported model in model/ is committed)
-checkpoints/
+results/preds_*.parquet
 
 __pycache__/
 .pytest_cache/

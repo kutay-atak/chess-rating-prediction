@@ -1,95 +1,83 @@
-"""Model inputs and outputs, shared by training, evaluation and the web server.
+"""Features of one side of a game after t plies, for the baselines (baselines.py).
 
-A game becomes a sequence of tokens: a start token (prediction before any move), then one token per
-half-move. Each token has a move id (SAN, or <start>/<unk>) and a few numeric features from the
-clocks and the time control. The model outputs, per token, a bivariate Gaussian over the two
-ratings; `to_ratings` turns that into per-player estimates and calibrated intervals.
-
-Numpy only, so the web server needs no torch.
+For a side after the first t plies: how many moves it has made, how it used its clock, the time
+control, the opening family (from ply 10 on) and, if Lichess analysed the game, how much its moves
+lost by the engine's evaluation. Conventions (seconds spent, losses) are in CLAUDE.md.
 """
-from collections import Counter
-
 import numpy as np
+import pandas as pd
 
-PAD, START, UNK = 0, 1, 2
-MAX_PLIES = 320  # moves past this are not seen; the estimate stays at the last one
-N_NUMERIC = 9
-Z80 = 1.2816  # half-width of a central 80% normal interval, in sigmas
-
-
-def time_control(tc):
-    """'180+2' -> (180, 2)."""
-    base, inc = tc.split("+")
-    return int(base), int(inc)
+CHECKPOINTS = [2, 5, 10, 20, 30, 40, 60, 80]
+ECO_FROM = 10  # the ECO header is set from moves after t; its letter is settled by ply 10 in 99.8% of games
+FEATURES = ["t", "own_moves", "log_spent_mean", "log_spent_sd", "fast_share", "clock_share", "base", "inc",
+            "berserk", "eco", "has_evals", "avg_loss", "mistakes", "blunders"]
 
 
-def build_vocab(san_lists, min_count=5):
-    counts = Counter(san for sans in san_lists for san in sans[:MAX_PLIES])
-    return sorted(san for san, n in counts.items() if n >= min_count)
+def own_moves(clocks, evals, base, inc, side):
+    """(seconds spent, loss in pawns, clock left) for each move of `side` (0 White, 1 Black), and berserk."""
+    plies = np.arange(side, len(clocks), 2)
+    left = clocks[plies]
+    berserk = bool(base > 0 and len(left) and left[0] == base / 2)  # Lichess halves the clock and drops the increment
+    spent = np.concatenate([[np.nan], left[:-1]]) - left + (0 if berserk else inc)
+    if len(left):
+        spent[0] = 0 if berserk else base - left[0]
+    spent = np.clip(spent, 0, None)  # whole-second clocks and time the opponent added make a few slightly negative
+    before = np.concatenate([[np.nan], evals[:-1]])[plies]  # White's first move has no eval before it
+    loss = np.clip((1 if side == 0 else -1) * (before - evals[plies]), 0, None)  # NaN where an eval is missing
+    return spent, loss, left, berserk
 
 
-def numeric_features(clocks, base, inc):
-    """[len(clocks) + 1, N_NUMERIC] float32; row 0 is the start token.
+def game_features(clocks, evals, base, inc, checkpoints=CHECKPOINTS):
+    """Features of both sides at each checkpoint t the game reaches, as a dict of equal-length arrays."""
+    clocks, evals = np.asarray(clocks, dtype=float), np.asarray(evals, dtype=float)
+    ts = np.array([t for t in checkpoints if t <= len(clocks)], dtype=int)
+    evals_seen = np.cumsum(~np.isnan(evals))
+    cols = {}
+    for side in (0, 1):
+        spent, loss, left, berserk = own_moves(clocks, evals, base, inc, side)
+        k = (ts + 1 - side) // 2  # own moves among the first t plies: White ⌈t/2⌉, Black ⌊t/2⌋
 
-    clocks[i] is the mover's seconds left after half-move i (White moves at even i). Time spent on a
-    move is the mover's previous clock (the base time for their first move) plus the increment
-    minus their clock now.
-    """
-    clocks = np.asarray(clocks, dtype=np.float64)
-    n = len(clocks)
-    prev = np.full(n, float(base))
-    prev[2:] = clocks[:-2]
-    spent = np.clip(prev + inc - clocks, 0, None)
-    other = np.full(n, float(base))  # opponent's clock while this move was made
-    other[1:] = clocks[:-1]
+        def upto(x):
+            return np.concatenate([[0.0], np.cumsum(x)])[k]  # sum over the first k own moves
 
-    f = np.zeros((n + 1, N_NUMERIC))
-    f[0, 7] = 1  # start token
-    f[1:, 0] = np.where(np.arange(n) % 2 == 0, 1, -1)  # White / Black move
-    f[1:, 1] = clocks / base
-    f[1:, 2] = np.log1p(clocks) / 5
-    f[1:, 3] = np.log1p(spent) / 3
-    f[1:, 4] = spent / np.maximum(prev + inc, 1)
-    f[1:, 8] = other / base
-    f[:, 5] = np.log(base / 180)
-    f[:, 6] = inc / 5
-    return f.astype(np.float32)
-
-
-def encode(sans, clocks, base, inc, index):
-    """(tokens [T+1] int64, numeric [T+1, N_NUMERIC] float32), cut to MAX_PLIES moves.
-
-    index maps SAN -> id, as from `vocab_index`.
-    """
-    sans, clocks = sans[:MAX_PLIES], clocks[:MAX_PLIES]
-    tokens = np.array([START] + [index.get(san, UNK) for san in sans], dtype=np.int64)
-    return tokens, numeric_features(clocks, base, inc)
+        log_spent = np.log1p(spent)  # log1p: 0-second moves (premoves, the untimed first move) are common
+        s1, s2, n_loss = upto(log_spent), upto(log_spent ** 2), upto(~np.isnan(loss))
+        part = {
+            "side": np.where(side == 0, "white", "black").repeat(len(ts)),
+            "t": ts,
+            "own_moves": k,
+            "log_spent_mean": s1 / k,
+            "log_spent_sd": np.where(k > 1, np.sqrt(np.maximum(s2 - s1 ** 2 / k, 0) / np.maximum(k - 1, 1)), np.nan),
+            "fast_share": upto(spent < 2) / k,
+            "clock_share": left[k - 1] / base if base > 0 else np.full(len(ts), np.nan),  # 0+N games have no base
+            "berserk": np.full(len(ts), berserk),
+            "has_evals": evals_seen[ts - 1] > 0,  # the same for both sides: was this game analysed (so far)?
+            "avg_loss": np.where(n_loss > 0, upto(np.nan_to_num(loss)) / np.maximum(n_loss, 1), np.nan),
+            "mistakes": np.where(n_loss > 0, upto(loss >= 1), np.nan),
+            "blunders": np.where(n_loss > 0, upto(loss >= 3), np.nan),
+        }
+        for c, v in part.items():
+            cols.setdefault(c, []).append(v)
+    return {c: np.concatenate(v) for c, v in cols.items()}
 
 
-def vocab_index(vocab):
-    return {san: i + 3 for i, san in enumerate(vocab)}
-
-
-def split_outputs(raw, center, scale):
-    """Raw model outputs [..., 5] -> (mu_w, mu_b, sd_w, sd_b, rho) in rating points."""
-    raw = np.asarray(raw, dtype=np.float64)
-    mu = raw[..., :2] * scale + center
-    sd = np.exp(raw[..., 2:4]) * scale
-    rho = 0.99 * np.tanh(raw[..., 4])
-    return mu[..., 0], mu[..., 1], sd[..., 0], sd[..., 1], rho
-
-
-def to_ratings(raw, meta):
-    """Raw outputs [T+1, 5] for one game -> list of per-ply dicts with estimates and 80% intervals.
-
-    Interval half-widths are Z80 * sd * the calibration scale for that ply, fitted on val games.
-    """
-    mu_w, mu_b, sd_w, sd_b, _ = split_outputs(raw, meta["center"], meta["scale"])
-    cal = np.asarray(meta["calibration"])
-    k = Z80 * cal[np.minimum(np.arange(len(mu_w)), len(cal) - 1)]
-    return [
-        {"ply": t,
-         "white": {"rating": round(mu_w[t]), "low": round(mu_w[t] - k[t] * sd_w[t]), "high": round(mu_w[t] + k[t] * sd_w[t])},
-         "black": {"rating": round(mu_b[t]), "low": round(mu_b[t] - k[t] * sd_b[t]), "high": round(mu_b[t] + k[t] * sd_b[t])}}
-        for t in range(len(mu_w))
-    ]
+def rows(games, checkpoints=CHECKPOINTS):
+    """One row per side of each game at each checkpoint it reaches: features plus what the models and
+    evaluation need (rating, split, scored, weight, TimeControl)."""
+    parts = []
+    for g in games.itertuples(index=False):
+        base, inc = map(int, g.TimeControl.split("+"))
+        f = game_features(g.clocks, g.evals, base, inc, checkpoints)
+        f["game_id"] = np.full(len(f["t"]), g.game_id)
+        parts.append(f)
+    df = pd.DataFrame({c: np.concatenate([p[c] for p in parts]) for c in parts[0]})
+    g = games.set_index("game_id").loc[df.game_id]
+    white = df.side.to_numpy() == "white"
+    df["rating"] = np.where(white, g.WhiteElo, g.BlackElo)
+    df["scored"] = np.where(white, g.score_white, g.score_black)
+    df["split"], df["weight"], df["TimeControl"] = g.split.to_numpy(), g.weight.to_numpy(), g.TimeControl.to_numpy()
+    tc = df.TimeControl.str.split("+", expand=True).astype(int)
+    df["base"], df["inc"] = tc[0], tc[1]
+    letter = g.ECO.str[0].where(df.t.to_numpy() >= ECO_FROM).to_numpy()
+    df["eco"] = pd.Categorical(letter, categories=list("ABCDE"))
+    return df
