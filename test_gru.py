@@ -70,3 +70,5 @@ def test_predict_reads_the_output_after_ply_t():
     assert set(preds.t[preds.game_id == 11]) == {2, 5, 10} and set(preds.t[preds.game_id == 10]) == set(CHECKPOINTS)
     assert np.allclose(preds["mean"], 1500 + 100 * preds.t)
     assert np.allclose(preds.hi - preds["mean"], 1.645 * 100)
+    short = predict(plies_seen, data, np.array([1]), np.array([10, 11]), m=1500, sd=100)  # a batch of short games only
+    assert set(short.t) == {2, 5, 10}

@@ -142,6 +142,8 @@ def predict(model, data, idx, game_ids, m, sd):
             mean, logvar = model(moves, x)
             for t in CHECKPOINTS:
                 ok = (lengths >= t).numpy()
+                if not ok.any():
+                    break  # no game in this batch reaches t, nor any later checkpoint
                 mu = mean[ok, t - 1].numpy() * sd + m  # the output after ply t sits at index t - 1
                 half = Z * np.exp(logvar[ok, t - 1].numpy() / 2) * sd
                 for side, name in enumerate(("white", "black")):
