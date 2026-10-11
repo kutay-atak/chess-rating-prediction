@@ -9,7 +9,7 @@ Predicts both players' Lichess blitz ratings after every move, with 90% interval
 - [x] Phase 3 — GRU sequence model (Data Mining and Neural Networks)
 - [x] Phase 4 — State-space filter (Advanced Time Series Analysis)
 - [x] Phase 5 — Latent skill model (Structural Equations)
-- [ ] Phase 6 — Figures and demo app (Data Visualization in Data Science)
+- [x] Phase 6 — Figures and demo app (Data Visualization in Data Science)
 
 ## Data
 
@@ -159,7 +159,16 @@ Run it locally with `streamlit run app.py`.
 
 To deploy: at [share.streamlit.io](https://share.streamlit.io), pick this repo, branch `main` and `app.py`. `requirements.txt` already uses CPU-only torch wheels.
 
-**Live app:** _link to be added after deployment_
+**Play it:** [Blitz Rating Reader](https://claude.ai/artifact/FdDzG4FNMxNBzUcJvn7V8v). Open it, and its owner can share it from the page's Share menu.
+
+On that page you play a blitz game on a real clock, against a friend or yourself, and watch both ratings being estimated move by move. Or you paste a Lichess PGN with clock comments and step through it.
+
+The page is `web/`, and the same GRU runs in the browser:
+- `python export_web.py` writes the weights to `web/model.json`;
+- `web/model.js` ports `ply_inputs` and the GRU step;
+- `test_web.py` checks, under Node, that its bands match the Python model to within 0.5 rating points.
+
+The Streamlit app above is the same model in Python; deploy it as described if you want a public server.
 
 ## Limitations
 
