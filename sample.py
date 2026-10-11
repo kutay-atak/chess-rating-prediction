@@ -64,6 +64,7 @@ def main(folder):
     sample = pd.concat(parts, ignore_index=True)  # same order as `drawn`: by shard, then by row
     sample.insert(0, "game_id", np.arange(len(sample)))
     sample["shard"] = shard[drawn]  # games/ part = downloaded shard, the cluster in the shard-level SE (evaluate.py)
+    sample["row"] = row[drawn]  # row within the shard: with `shard`, the game's key in games/ (move_quality.py)
     sample["stratum"] = np.array(LABELS)[strata[drawn]]
     sample["weight"] = weight[strata[drawn]]
     sample["split"], sample["score_white"], sample["score_black"] = score_sides(sample.White, sample.Black)

@@ -4,7 +4,7 @@ import numpy as np
 
 import pandas as pd
 
-from evaluate import by_band, interval_score, player_bootstrap, shard_jackknife, stratified
+from evaluate import by_band, gap_scores, interval_score, player_bootstrap, shard_jackknife, stratified, weighted_corr
 
 
 def test_stratified_estimate_and_se_by_hand():
@@ -60,3 +60,18 @@ def test_by_band_weights_sides_by_game_weight():
     band = by_band(preds, test).set_index("band")
     assert band.loc["1400-1799", "n"] == 2 and band.loc["1400-1799", "bias"] == (3 * -100 + 1 * -200) / 4
     assert band.loc["1400-1799", "coverage"] == 0.75 and band.loc["2200+", "mae"] == 800
+
+
+def test_weighted_corr():
+    x, y = np.array([1.0, 2, 3, 4]), np.array([2.0, 1, 4, 3])
+    assert math.isclose(weighted_corr(x, y, np.ones(4)), np.corrcoef(x, y)[0, 1])
+    assert np.isnan(weighted_corr(np.zeros(4), y, np.ones(4)))
+
+
+def test_gap_scores_find_the_stronger_player():
+    # game 1: true gap +300, predicted +50 (found); game 2: true gap -250, predicted +10 (missed, weight 3)
+    p = pd.DataFrame({"game_id": [1, 1, 2, 2], "side": ["white", "black"] * 2, "mean": [1625.0, 1575, 1560, 1550]})
+    games = pd.DataFrame({"game_id": [1, 2], "WhiteElo": [1800, 1400], "BlackElo": [1500, 1650], "weight": [1.0, 3]})
+    corr, found = gap_scores(p, games)
+    assert found == 0.25 and math.isclose(corr, 1.0)  # two games: any two points lie on a line
+    assert all(np.isnan(gap_scores(p.assign(mean=1500.0), games)))  # a constant gap never picks a side
