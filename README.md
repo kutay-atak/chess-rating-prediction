@@ -8,7 +8,7 @@ Predicts both players' Lichess blitz ratings after every move, with 90% interval
 - [x] Phase 2 — Features, baselines, evaluation
 - [x] Phase 3 — GRU sequence model (Data Mining and Neural Networks)
 - [x] Phase 4 — State-space filter (Advanced Time Series Analysis)
-- [ ] Phase 5 — Latent skill model (Structural Equations)
+- [x] Phase 5 — Latent skill model (Structural Equations)
 - [ ] Phase 6 — Figures and demo app (Data Visualization in Data Science)
 
 ## Data
@@ -100,6 +100,49 @@ Two fixes would follow, neither done here: model the error as a persistent offse
 
 On error the filters (269–285) sit near `timecontrol` and behind lgbm, far from the GRU, which reads the moves themselves rather than one move's clock use at a time.
 
+### Latent skill (SEM)
+
+Does skill split into accuracy and time use? `sem_data.py` takes every game Lichess analysed in the 12 shards and keeps one random game per player, with at most one player per game, so the rows are independent: 342,000 player-games. Per player-game it records:
+- **Accuracy indicators:** log average loss, mistake rate (loss ≥ 1 pawn) and blunder rate (≥ 3 pawns). Higher means *less* accurate.
+- **Time-use indicators:** mean and sd of log seconds per move, and the share of moves made with under 10% of base time left.
+
+`skill_sem.R` (lavaan, MLR) fits two factors and regresses rating on both. Standardised estimates:
+
+```mermaid
+graph LR
+  A((Inaccuracy)) -->|1.00| L[log avg loss]
+  A -->|0.83| M[mistake rate]
+  A -->|0.83| B[blunder rate]
+  T((Time spent)) -->|1.00| S[mean log seconds]
+  T -->|0.50| D[sd log seconds]
+  T -->|0.07| C[low-clock share]
+  A -->|-0.29| R[rating]
+  T -->|-0.29| R
+  A <-.->|0.16| T
+```
+
+| n | scaled χ² (df) | CFI | TLI | RMSEA | SRMR | R² of rating |
+|---|---|---|---|---|---|---|
+| 342,000 | 53,500 (14) | 0.944 | 0.916 | 0.110 | 0.056 | 0.19 |
+
+**What it says:**
+- **Two skills, each tied to rating about equally and nearly independently.** Players who lose less per move and players who move faster are both higher rated: β = −0.29 each, and the two factors correlate only 0.16. Together they explain 19% of the variance in rating.
+- **"Time use" is really one indicator: how long you think.** Low-clock share hardly loads on it (0.07), so time trouble is a different thing from thinking time.
+- **Fit is only moderate.** CFI is 0.94, and RMSEA 0.11 is above the usual 0.08.
+- **Two loadings are fixed at 1.00.** Left free, the residual variances of log average loss and mean log seconds come out negative (Heywood cases), so they are fixed at 0. Average loss is nearly the sum of mistakes and blunders, and the three time indicators barely correlate (0.07–0.50).
+
+**Measurement invariance across the three most common time controls** (3+0, 5+0, 3+2):
+
+| model | scaled χ² (df) | CFI | RMSEA | SRMR | ΔCFI |
+|---|---|---|---|---|---|
+| configural | 31,589 (30) | 0.951 | 0.114 | 0.047 | |
+| metric (equal loadings) | 30,391 (38) | 0.950 | 0.102 | 0.048 | −0.001 |
+| scalar (+ equal intercepts) | 41,707 (46) | 0.933 | 0.108 | 0.065 | −0.017 |
+
+Equal loadings hold (ΔCFI −0.001, within the usual 0.01), so the factors mean the same thing in each time control. Equal intercepts do not (−0.017): at the same latent level, a 3+0 player shows different raw time use than a 5+0 player, as expected when the clock differs. Comparing factor *means* across time controls would therefore not be valid.
+
+**Caveat:** only analysed games are used (about 9% of the month), and players who request analysis are not a random subset.
+
 ## Limitations
 
 **Predictions are pulled toward the middle.** Here are the GRU's results at ply 80 by the player's own rating (`results/metrics_by_band.csv`):
@@ -132,6 +175,8 @@ python gru.py 20000   # quick check on 20 000 train games that the loss falls
 python gru.py
 python kalman.py
 python evaluate.py
+python sem_data.py
+Rscript skill_sem.R   # needs R with lavaan, e.g. apt-get install r-base-core r-cran-lavaan
 pytest
 ```
 
