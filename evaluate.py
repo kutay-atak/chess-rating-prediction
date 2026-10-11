@@ -28,8 +28,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 REPLICATES = 200  # player bootstrap replicates for se_player
-COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a"}  # validated categorical slots 1-3
-MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^"}
+COLORS = {"mean": "#2a78d6", "timecontrol": "#eb6834", "lgbm": "#1baf7a", "gru": "#eda100"}  # validated slots 1-4
+MARKERS = {"mean": "o", "timecontrol": "s", "lgbm": "^", "gru": "D"}
 
 
 def population(folder="games"):
