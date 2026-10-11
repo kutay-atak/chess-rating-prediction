@@ -1,14 +1,15 @@
 """Each player's rating from the quality of their own moves only.
 
 From games in games/ that Lichess analysed, a table of how likely each size of move loss is for a player
-of each rating, in the opening, middlegame and endgame. A player's estimate starts from the month's rating
-distribution and, after each of their own moves, is multiplied by that move's likelihood at every rating
+of each rating, in the opening, middlegame and endgame. A player's estimate starts from the rating distribution
+of train players in analysed games and, after each of their own moves, is multiplied by that move's likelihood at every rating
 (tempered by alpha, since one player's moves are not independent evidence). The two players never share
 anything, so a good move raises only the mover and the gap between them can grow.
 
 - table from train players, alpha per checkpoint from val players (so 90% intervals cover 90%),
   scores on unseen test players, including how well the gap between the two players is found
-- writes results/move_quality.csv (test metrics, with the GRU on the same games) and web/quality.json
+- writes results/move_quality.csv (test metrics; and both it and the GRU on the analysed test games
+  that are also in sample.parquet) and web/quality.json
 
 Usage: python move_quality.py
 """
@@ -79,7 +80,8 @@ def side_moves(evals, side, t):
 
 
 def collect():
-    """Counts from train players' moves, and val/test sides (rating, evals, game id) for calibration and scoring."""
+    """Counts from train players' moves, and every side of val/test games (rating, evals, game id, and whether
+    the player is unseen) for calibration and scoring."""
     counts = np.zeros((len(PHASE_EDGES) + 1, len(GRID), len(LOSS_EDGES) + 1))
     held, prior = [], np.zeros(len(GRID))
     for shard, path in enumerate(sorted(glob.glob("games/part-*.parquet"))):
@@ -92,19 +94,18 @@ def collect():
         for i, row in enumerate(g.itertuples(index=False)):
             evals = np.asarray(row.evals, dtype=float)
             for side, (name, elo) in enumerate([(row.White, row.WhiteElo), (row.Black, row.BlackElo)]):
-                if player_split(name) != split[i]:
-                    continue  # only sides whose player belongs to the game's split
-                if split[i] == "train":
+                scored = player_split(name) == split[i]  # the side's player belongs to the game's split
+                if split[i] == "train" and scored:
                     loss = move_losses(evals)
                     ply = np.arange(len(loss))
                     keep = (ply % 2 == side) & ~np.isnan(loss)
                     lb, ph = bins(loss[keep], ply[keep])
                     np.add.at(counts, (ph, rating_index(elo), lb), 1)
                     prior[rating_index(elo)] += 1
-                else:
-                    held.append((split[i], f"{shard}-{analysed[i]}", side, float(elo), evals[:MAX_PLY]))
+                elif split[i] != "train":
+                    held.append((split[i], f"{shard}-{analysed[i]}", side, float(elo), evals[:MAX_PLY], scored))
         print(f"{path}: {len(g):,} analysed games", flush=True)
-    return counts, prior, pd.DataFrame(held, columns=["split", "game", "side", "rating", "evals"])
+    return counts, prior, pd.DataFrame(held, columns=["split", "game", "side", "rating", "evals", "scored"])
 
 
 def estimates(sides, log_prior, log_lik, alpha_of_t):
@@ -116,39 +117,58 @@ def estimates(sides, log_prior, log_lik, alpha_of_t):
                 break
             lb, ph = side_moves(s.evals, s.side, t)
             lo, mean, hi = summary(posterior(log_prior, log_lik, lb, ph, alpha_of_t[t]))
-            rows.append((s.game, s.side, t, s.rating, lo, mean, hi))
-    return pd.DataFrame(rows, columns=["game", "side", "t", "rating", "lo", "mean", "hi"])
+            rows.append((s.game, s.side, t, s.rating, lo, mean, hi, s.scored))
+    return pd.DataFrame(rows, columns=["game", "side", "t", "rating", "lo", "mean", "hi", "scored"])
 
 
 def calibrate(val, log_prior, log_lik):
-    """alpha per checkpoint: the largest (sharpest) alpha whose 90% intervals still cover 90% of val sides."""
-    best = {}
+    """alpha per checkpoint: the largest (sharpest) alpha whose 90% intervals still cover 90% of val sides,
+    never above the previous checkpoint's (more moves of one player carry more shared error, not less).
+    If no alpha reaches 90% (at ply 80 even the prior alone under-covers the players of long games), the
+    previous checkpoint's alpha is kept rather than falling back to the prior, and the shortfall is reported."""
+    best, cap = {}, ALPHAS[-1]
     for t in CHECKPOINTS:
         v = val[val.evals.map(len) >= t]
         moves = [side_moves(s.evals, s.side, t) for s in v.itertuples(index=False)]
-        best[t] = ALPHAS[0]
-        for a in ALPHAS:
+        best[t] = cap
+        for a in ALPHAS[ALPHAS <= cap][::-1]:
             cov = np.mean([lo <= r <= hi for (lb, ph), r in zip(moves, v.rating)
                            for lo, _, hi in [summary(posterior(log_prior, log_lik, lb, ph, a))]])
-            if cov < LEVEL:
+            if cov >= LEVEL:
+                best[t] = float(a)
                 break
-            best[t] = a
+        cap = best[t]
     return best
 
 
 def gap_metrics(est):
-    """Per t: per-side MAE and coverage, and how well White - Black is found."""
+    """Per t: per-side MAE and coverage over unseen players, and how well White - Black is found over both sides
+    of every game (as in evaluate.py: no model is told who is playing)."""
     out = []
     for t, x in est.groupby("t"):
         w, b = x[x.side == 0].set_index("game"), x[x.side == 1].set_index("game")
         both = w.index.intersection(b.index)
         pred, true = (w["mean"] - b["mean"])[both], (w.rating - b.rating)[both]
         big = true.abs() > 200
+        x = x[x.scored]
         out.append(dict(t=t, mae=(x.rating - x["mean"]).abs().mean(),
                         coverage=((x.lo <= x.rating) & (x.rating <= x.hi)).mean(),
                         gap_corr=np.corrcoef(pred, true)[0, 1], gap_mae=(pred - true).abs().mean(),
-                        stronger_found=(np.sign(pred[big]) == np.sign(true[big])).mean(), n=len(x)))
+                        stronger_found=(np.sign(pred[big]) == np.sign(true[big])).mean(), n=len(x), pairs=len(both),
+                        big_gap_pairs=int(big.sum())))
     return pd.DataFrame(out)
+
+
+def gru_estimates(path="results/preds_gru.parquet"):
+    """The GRU's predictions for test sides, shaped like estimates() and keyed by shard and row in games/."""
+    s = pd.read_parquet("sample.parquet", columns=["game_id", "shard", "row", "WhiteElo", "BlackElo",
+                                                   "score_white", "score_black"])
+    p = pd.read_parquet(path).merge(s, on="game_id")
+    white = (p.side == "white").to_numpy()
+    return pd.DataFrame({"game": p["shard"].astype(str) + "-" + p["row"].astype(str), "side": np.where(white, 0, 1),
+                         "t": p.t, "rating": np.where(white, p.WhiteElo, p.BlackElo).astype(float),
+                         "lo": p.lo, "mean": p["mean"], "hi": p.hi,
+                         "scored": np.where(white, p.score_white, p.score_black)})
 
 
 def main():
@@ -157,9 +177,14 @@ def main():
     log_prior = np.log((prior + 1) / (prior + 1).sum())
     val, test = held[held.split == "val"], held[held.split == "test"]
     print(f"{int(counts.sum()):,} train moves; {len(val):,} val and {len(test):,} test sides", flush=True)
+    val = val[val.scored]  # calibrate on unseen players only
     alpha = calibrate(val.sample(min(len(val), 20_000), random_state=0), log_prior, log_lik)
     print("alpha by checkpoint", alpha, flush=True)
-    metrics = gap_metrics(estimates(test, log_prior, log_lik, alpha)).assign(model="move_quality")
+    est, gru = estimates(test, log_prior, log_lik, alpha), gru_estimates()
+    shared = set(est.game) & set(gru.game)  # analysed test games that are also in the sample, for a like-for-like comparison
+    metrics = pd.concat([gap_metrics(est).assign(model="move_quality", games="all analysed test games"),
+                         gap_metrics(est[est.game.isin(shared)]).assign(model="move_quality", games="shared with gru"),
+                         gap_metrics(gru[gru.game.isin(shared)]).assign(model="gru", games="shared with gru")])
     metrics.to_csv("results/move_quality.csv", index=False, float_format="%.4f")
     print(metrics.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     with open("web/quality.json", "w") as f:

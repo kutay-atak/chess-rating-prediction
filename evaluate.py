@@ -13,6 +13,11 @@ Per model and checkpoint t:
   games at every t and shows the gain from more plies alone
 - weighted_coverage, interval_score: the stratified estimator applied to the share of a game's scored
   sides covered, and to the interval score (width plus 2/0.1 times any miss; lower is better)
+- gap_corr, stronger_found: on both sides of every test game, the correlation of the predicted and the
+  true rating gap (White - Black), and the share of games with a true gap over 200 where the higher
+  estimate goes to the stronger player; both weighted by the game weight N_h/n_h. Both sides, not only
+  scored ones: games with two unseen players are too few (156 with a gap over 200), and no model is told
+  who is playing, so a train player on one side of a test game gives nothing away
 Per model, t and band of the side's own rating: bias, MAE, coverage and width (by_band).
 Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png, results/coverage.png, results/width.png and
 results/kalman_coverage.png (the two Kalman filters' model-based intervals, against the GRU's calibrated ones).
@@ -103,7 +108,8 @@ def shard_jackknife(y, h, shard, N_shard):
 
 
 def truth():
-    """Scored test sides: game_id, side, rating, player, stratum index, shard, plies, weight."""
+    """(scored test sides: game_id, side, rating, player, stratum index, shard, plies, weight;
+    n_all[h, t]; test games: game_id, WhiteElo, BlackElo, weight)."""
     s = pd.read_parquet("sample.parquet", columns=["game_id", "White", "Black", "WhiteElo", "BlackElo", "split",
                                                    "score_white", "score_black", "moves", "shard", "weight"])
     s["h"] = stratum(s.WhiteElo, s.BlackElo)
@@ -113,7 +119,30 @@ def truth():
     sides = pd.concat(sides)
     test = sides[(sides.split == "test") & sides.scored]
     n_all = np.array([[((s.h == k) & (s.plies >= t)).sum() for t in CHECKPOINTS] for k in range(len(LABELS))])
-    return test[["game_id", "side", "rating", "player", "h", "shard", "plies", "weight"]], n_all
+    games = s[s.split == "test"][["game_id", "WhiteElo", "BlackElo", "weight"]]
+    return test[["game_id", "side", "rating", "player", "h", "shard", "plies", "weight"]], n_all, games
+
+
+def weighted_corr(x, y, w):
+    """Pearson correlation of x and y with weights w; NaN when x or y is constant (the mean baseline's gap is always 0)."""
+    dx, dy = x - np.average(x, weights=w), y - np.average(y, weights=w)
+    vx, vy = np.average(dx ** 2, weights=w), np.average(dy ** 2, weights=w)
+    return np.average(dx * dy, weights=w) / np.sqrt(vx * vy) if vx > 0 and vy > 0 else np.nan
+
+
+def gap_scores(p, games):
+    """(gap_corr, stronger_found) from predictions p (game_id, side, mean) at one t for the test games
+    (game_id, WhiteElo, BlackElo, weight); see the module docstring. NaN for a model whose predicted gap
+    never varies (mean, timecontrol), since it never picks a side."""
+    m = p.pivot_table(index="game_id", columns="side", values="mean").dropna()
+    g = games.set_index("game_id").loc[m.index]
+    pred = (m["white"] - m["black"]).to_numpy()
+    true = g.WhiteElo.to_numpy(dtype=float) - g.BlackElo.to_numpy(dtype=float)
+    weight = g.weight.to_numpy()
+    big = np.abs(true) > 200
+    if np.ptp(pred) == 0 or not big.any():
+        return np.nan, np.nan
+    return weighted_corr(pred, true, weight), np.average(np.sign(pred[big]) == np.sign(true[big]), weights=weight[big])
 
 
 def interval_score(lo, hi, y, level=LEVEL):
@@ -121,7 +150,7 @@ def interval_score(lo, hi, y, level=LEVEL):
     return hi - lo + 2 / (1 - level) * (np.maximum(lo - y, 0) + np.maximum(y - hi, 0))
 
 
-def score(preds, test, N_shard, n_all):
+def score(preds, test, N_shard, n_all, test_games):
     N = N_shard.sum(0)
     rows = []
     d = preds.merge(test, on=["game_id", "side"])
@@ -144,6 +173,7 @@ def score(preds, test, N_shard, n_all):
             se_shard=shard_jackknife(g.err.to_numpy(), h, g.shard.to_numpy(), N_shard[:, :, j]),
             weighted_mae_80=stratified(g.err.to_numpy()[long], h[long], N[:, -1], n_all[:, -1])[0],
             coverage=covered.mean(), weighted_coverage=stratified(g.covered.to_numpy(), h, N[:, j], n_all[:, j])[0],
+            **dict(zip(["gap_corr", "stronger_found"], gap_scores(preds[preds.t == t], test_games))),
             width=(x.hi - x.lo).mean(), weighted_half_width=stratified(g.width.to_numpy(), h, N[:, j], n_all[:, j])[0] / 2,
             interval_score=stratified(g.iscore.to_numpy(), h, N[:, j], n_all[:, j])[0],
             n=len(x)))
@@ -199,12 +229,12 @@ def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None
 
 def main():
     N_shard = population()
-    test, n_all = truth()
+    test, n_all, games = truth()
     parts, bands = [], []
     for path in sorted(glob.glob("results/preds_*.parquet")):
         model = os.path.basename(path)[len("preds_"):-len(".parquet")]
         preds = pd.read_parquet(path)
-        parts.append(score(preds, test, N_shard, n_all).assign(model=model))
+        parts.append(score(preds, test, N_shard, n_all, games).assign(model=model))
         bands.append(by_band(preds, test).assign(model=model))
         print(f"scored {model}", flush=True)
     order = [m for m in COLORS if any(p.model.iloc[0] == m for p in parts)]
