@@ -55,7 +55,7 @@ Goal: a GRU that predicts both ratings after every ply, with uncertainty.
 
 - `gru.py`. Inputs per ply: SAN move embedding (vocabulary from train; rare moves map to an unknown token), log seconds spent, clock left as a share of base, side to move, base time and increment (scaled), eval and loss with a missing-value mask.
 - Output per ply: mean and log-variance of White's and Black's standardised rating. Loss: Gaussian negative log-likelihood summed over plies and sides. Early stopping on validation NLL.
-- Train unweighted: the oversampled tails help learning; the weights matter only at evaluation.
+- Train weighted by N_h/n_h, like the baselines: the strata are bands of the ratings being predicted, so an unweighted fit learns the sample's rating mix, not the month's.
 - First train on 20 000 games to check the loss falls, then on everything. If the CPU is too slow, use a free Colab or Kaggle GPU.
 - Save the weights to `model.pt` and keep it under 20 MB, since the demo loads it from the repo. Write preds at the checkpoints, with interval = mean ± 1.645 sd.
 

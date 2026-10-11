@@ -33,12 +33,13 @@ def test_rare_moves_are_unknown():
 
 def test_nll_skips_padding_and_unscored_sides():
     mean = torch.tensor([[[0.0, 1.0], [1.0, 9.0]], [[2.0, 0.0], [NAN, NAN]]])
-    logvar = torch.zeros(2, 2, 2)
+    logvar = torch.full((2, 2, 2), math.log(4))  # variance 4, so the log-variance term counts
     y = torch.tensor([[1.0, 0.0], [0.0, 0.0]])
     keep = torch.tensor([[[True, False], [True, False]], [[True, True], [False, False]]])  # Black unscored in game 0
     w = torch.tensor([2.0, 1.0])
-    expected = (2 * 0.5 * (1 + 0) + 1 * 0.5 * (4 + 0)) / 2
-    assert math.isclose(nll(mean, logvar, y, keep, w).item(), expected)
+    half_log4 = 0.5 * math.log(4)
+    expected = (2 * (half_log4 + 1 / 8 + half_log4 + 0) + 1 * (half_log4 + 4 / 8 + half_log4 + 0)) / 2
+    assert math.isclose(nll(mean, logvar, y, keep, w).item(), expected, rel_tol=1e-6)  # float32
 
 
 def games(lengths):
