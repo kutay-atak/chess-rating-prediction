@@ -131,8 +131,9 @@ def plot(metrics, column, path, ylabel, title, band=None, line=None, dashed=None
     ax.grid(axis="y", color="#e4e3df", lw=0.8)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    if legend:
-        ax.legend(frameon=False, loc="best")
+    if legend:  # one row between the title and the plot, clear of the lines
+        ax.legend(frameon=False, ncol=len(COLORS), loc="lower center", bbox_to_anchor=(0.5, 1.0))
+        ax.set_title(title, pad=28)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
