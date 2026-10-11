@@ -40,6 +40,14 @@ def test_shard_jackknife_is_the_se_of_a_mean_for_one_stratum():
     assert math.isclose(se, 1 / math.sqrt(3))
 
 
+def test_shard_jackknife_drops_the_deleted_shards_population():
+    # y is 0 in stratum 0 and 1 in stratum 1, so each replicate is stratum 1's share of N without shard i
+    y, h, shard = np.array([0.0, 1, 0, 1, 0, 1]), np.array([0, 1] * 3), np.array([0, 0, 1, 1, 2, 2])
+    N_shard = np.array([[3.0, 1], [1, 1], [2, 2]])
+    est = np.array([3 / 6, 3 / 8, 2 / 6])
+    assert math.isclose(shard_jackknife(y, h, shard, N_shard), math.sqrt(2 / 3 * ((est - est.mean()) ** 2).sum()))
+
+
 def test_interval_score_charges_twenty_times_the_miss():
     lo, hi = np.zeros(3), np.full(3, 10.0)
     assert np.allclose(interval_score(lo, hi, np.array([5.0, 12.0, -1.0])), [10, 50, 30])

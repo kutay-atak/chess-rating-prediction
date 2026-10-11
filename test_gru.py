@@ -77,4 +77,4 @@ def test_conformal_scales_by_sd_and_skips_unscored_sides():
                           "weight": 1.0})
     # scored |error| / sd: 1, 1.5, 0.5, 2 (the unscored black side is ignored); 90% weighted quantile: 2
     assert conformal(preds, truth) == {2: 2.0}
-    assert conformal(preds, truth.assign(weight=[1.0, 1, 1, 1, 0.01]), level=0.5) == {2: 1.0}
+    assert conformal(preds, truth.assign(weight=[1.0, 1, 1, 1, 0.01])) == {2: 1.5}  # unweighted it would be 2
