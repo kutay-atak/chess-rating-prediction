@@ -6,7 +6,7 @@ Ratings here are Lichess Glicko-2 blitz ratings, not FIDE Elo.
 
 ![Playing on the demo page: both players' rating estimates with 90% bands, updated after every move](results/screenshot_play.png)
 
-**Try it:** [Blitz Rating Reader](https://claude.ai/artifact/FdDzG4FNMxNBzUcJvn7V8v). Play a blitz game on a real clock and watch the estimates move, or paste a Lichess game. The link is private until its owner shares it from the page's Share menu.
+**Try it:** [Blitz Rating Reader](https://claude.ai/artifact/FdDzG4FNMxNBzUcJvn7V8v). Play a blitz game on a real clock and watch the estimates move, or paste a Lichess game. The link is private until its owner shares it from the page's Share menu. Or analyse any Lichess game in the [Streamlit app](https://chess-rating-reader.streamlit.app/).
 
 ## Results at a glance
 
@@ -197,7 +197,7 @@ Equal loadings hold (ΔCFI −0.001, within the usual 0.01): the factors mean th
 <img src="results/screenshot_phone_dark.png" alt="The demo at phone width in dark mode" width="30%">
 </p>
 
-**The Streamlit app** (`app.py`) is the same model in Python: paste a Lichess link or PGN, or try the built-in example. Run it with `streamlit run app.py`, or deploy it at [share.streamlit.io](https://share.streamlit.io) (repo, branch `main`, `app.py`); `requirements.txt` already uses CPU-only torch.
+**The Streamlit app** (`app.py`) is the same model in Python: paste a Lichess link or PGN, or try the built-in example. It is live at [chess-rating-reader.streamlit.app](https://chess-rating-reader.streamlit.app/). Run it locally with `streamlit run app.py`, or deploy your own copy at [share.streamlit.io](https://share.streamlit.io) (repo, branch `main`, `app.py`, Python 3.13); `requirements.txt` already uses CPU-only torch.
 
 ![The Streamlit app on the example game](results/screenshot_streamlit.png)
 
@@ -262,7 +262,7 @@ On the same games, judging moves by quality finds the stronger player about 61�
 | `evaluate.py` | one scorer for every `results/preds_*.parquet` model; writes `results/metrics*.csv` and the figures (the move-quality experiment scores itself, unweighted, in `move_quality.py`) |
 | `sem_data.py`, `skill_sem.R` | data and model for the latent skill SEM |
 | `move_quality.py` | the per-player move-quality experiment |
-| `demo.py`, `app.py` | the Streamlit demo |
+| `demo.py`, `app.py` | the Streamlit demo ([live](https://chess-rating-reader.streamlit.app/)) |
 | `export_web.py`, `web/` | the in-browser demo |
 | `test_*.py` | tests (pytest), run by GitHub Actions on every push |
 | `PLAN.md`, `CLAUDE.md` | the phase plan and the project conventions |
