@@ -14,7 +14,7 @@ Per model and checkpoint t:
 - weighted_coverage, interval_score: the stratified estimator applied to the share of a game's scored
   sides covered, and to the interval score (width plus 2/0.1 times any miss; lower is better)
 Per model, t and band of the side's own rating: bias, MAE, coverage and width (by_band).
-Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png, results/coverage.png and
+Writes results/metrics.csv, results/metrics_by_band.csv, results/mae.png, results/coverage.png, results/width.png and
 results/kalman_coverage.png (the two Kalman filters' model-based intervals, against the GRU's calibrated ones).
 
 Usage: python evaluate.py
@@ -131,9 +131,10 @@ def score(preds, test, N_shard, n_all):
         covered = ((x.lo <= x.rating) & (x.rating <= x.hi)).to_numpy().astype(float)
         games = pd.DataFrame({"game_id": x.game_id.to_numpy(), "h": x.h.to_numpy(), "shard": x.shard.to_numpy(),
                               "plies": x.plies.to_numpy(), "err": err, "covered": covered,
-                              "iscore": interval_score(x.lo, x.hi, x.rating).to_numpy()})
+                              "iscore": interval_score(x.lo, x.hi, x.rating).to_numpy(), "width": (x.hi - x.lo).to_numpy()})
         g = games.groupby("game_id").agg(h=("h", "first"), shard=("shard", "first"), plies=("plies", "first"),
-                                         err=("err", "mean"), covered=("covered", "mean"), iscore=("iscore", "mean"))
+                                         err=("err", "mean"), covered=("covered", "mean"), iscore=("iscore", "mean"),
+                                         width=("width", "mean"))
         h = g.h.to_numpy()
         wmae, se = stratified(g.err.to_numpy(), h, N[:, j], n_all[:, j])
         long = g.plies.to_numpy() >= CHECKPOINTS[-1]
@@ -143,7 +144,8 @@ def score(preds, test, N_shard, n_all):
             se_shard=shard_jackknife(g.err.to_numpy(), h, g.shard.to_numpy(), N_shard[:, :, j]),
             weighted_mae_80=stratified(g.err.to_numpy()[long], h[long], N[:, -1], n_all[:, -1])[0],
             coverage=covered.mean(), weighted_coverage=stratified(g.covered.to_numpy(), h, N[:, j], n_all[:, j])[0],
-            width=(x.hi - x.lo).mean(), interval_score=stratified(g.iscore.to_numpy(), h, N[:, j], n_all[:, j])[0],
+            width=(x.hi - x.lo).mean(), weighted_half_width=stratified(g.width.to_numpy(), h, N[:, j], n_all[:, j])[0] / 2,
+            interval_score=stratified(g.iscore.to_numpy(), h, N[:, j], n_all[:, j])[0],
             n=len(x)))
     return pd.DataFrame(rows)
 
@@ -219,6 +221,8 @@ def main():
     plot(calibrated, "weighted_coverage", "results/coverage.png", "share of sides inside the interval",
          "Coverage of the 90% intervals (solid: weighted, dashed: unweighted)", line=0.9, dashed="coverage",
          legend=True)  # the weighted lines all sit on 0.9, so end labels would collide
+    plot(metrics[metrics.model.isin(["timecontrol", "lgbm", "gru"])], "weighted_half_width", "results/width.png",
+         "half-width of the 90% interval (rating points)", "How fast the 90% intervals narrow (all calibrated to cover 90%)")
     kalman = metrics[metrics.model.isin(["gru", "kalman_iid", "kalman_ar1"])]
     if kalman.model.str.startswith("kalman").any():
         plot(kalman, "weighted_coverage", "results/kalman_coverage.png", "share of sides inside the interval",

@@ -23,6 +23,8 @@ Rated games from the [Lichess open database](https://database.lichess.org) (CC0)
 
 ![Weighted MAE by plies seen](results/mae.png)
 
+![Interval half-width by plies seen](results/width.png)
+
 ### Baselines
 
 LightGBM on clock, time-control, opening and (where Lichess analysed the game) engine-loss features gets from 281 rating points of error at ply 2 (no better than the time control alone) to 256 by ply 20, then only to 252 by ply 80, while the `mean` and `timecontrol` baselines stay near 293 and 280. So most of what these per-side summaries can tell is known by move 10, and the 90% intervals are still about ±520 points wide ([coverage](results/coverage.png), [all numbers](results/metrics.csv)).
@@ -143,6 +145,22 @@ Equal loadings hold (ΔCFI −0.001, within the usual 0.01), so the factors mean
 
 **Caveat:** only analysed games are used (about 9% of the month), and players who request analysis are not a random subset.
 
+## Demo
+
+![Demo: the board and both players' rating bands, move by move](results/demo.gif)
+
+`app.py` (Streamlit) takes a Lichess blitz game link, or a PGN with clocks, or a built-in example game from the test set. It runs the chosen GRU (`model.pt`, no evals) over every ply and shows:
+- the board, with a move slider;
+- both players' estimates and 90% bands, using the conformal multiplier of the last checkpoint at or before the ply.
+
+The true ratings appear at the last move. Non-blitz games are rejected, since the model has never seen them.
+
+Run it locally with `streamlit run app.py`.
+
+To deploy: at [share.streamlit.io](https://share.streamlit.io), pick this repo, branch `main` and `app.py`. `requirements.txt` already uses CPU-only torch wheels.
+
+**Live app:** _link to be added after deployment_
+
 ## Limitations
 
 **Predictions are pulled toward the middle.** Here are the GRU's results at ply 80 by the player's own rating (`results/metrics_by_band.csv`):
@@ -176,6 +194,7 @@ python gru.py
 python kalman.py
 python evaluate.py
 python sem_data.py
+streamlit run app.py
 Rscript skill_sem.R   # needs R with lavaan, e.g. apt-get install r-base-core r-cran-lavaan
 pytest
 ```
