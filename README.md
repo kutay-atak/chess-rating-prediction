@@ -6,7 +6,7 @@ Ratings here are Lichess Glicko-2 blitz ratings, not FIDE Elo.
 
 ![Playing on the demo page: both players' rating estimates with 90% bands, updated after every move](results/screenshot_play.png)
 
-**Try it:** [Blitz Rating Reader](https://claude.ai/artifact/FdDzG4FNMxNBzUcJvn7V8v). Play a blitz game on a real clock and watch the estimates move, or paste a Lichess game. The link is private until its owner shares it from the page's Share menu. Or analyse any Lichess game in the [Streamlit app](https://chess-rating-reader.streamlit.app/).
+**Try it:** play a blitz game on a real clock in the [browser demo](https://kutay-atak.github.io/chess-rating-prediction/web/) and watch the estimates move, or analyse a game in the [Streamlit app](https://chess-rating-reader.streamlit.app/).
 
 ## Results at a glance
 
@@ -186,10 +186,11 @@ Equal loadings hold (ΔCFI −0.001, within the usual 0.01): the factors mean th
 
 ![Coverage of the 90% intervals: weighted (solid) and unweighted (dashed)](results/coverage.png)
 
-**The web demo** (`web/`, published as [Blitz Rating Reader](https://claude.ai/artifact/FdDzG4FNMxNBzUcJvn7V8v)) runs the chosen GRU in the browser:
+**The web demo** (`web/`, [live](https://kutay-atak.github.io/chess-rating-prediction/web/)) runs the chosen GRU in the browser, with no server:
 - **Play a game:** both sides on one board, on a real blitz clock (3+0, 3+2, 5+0, 5+3) that starts after both first moves and adds the increment, as on Lichess. After every move both estimates and bands update.
 - **Analyse a Lichess game:** paste a PGN exported with clock comments, step through it with a slider, and see the true ratings at the last move.
-- `export_web.py` writes the weights to JSON, `web/model.js` ports the per-ply inputs and the GRU step to JavaScript, and `test_web.py` checks under Node that the browser's numbers match Python's to within 0.5 rating points.
+- `export_web.py` writes the weights to `web/model.json`, `web/model.js` ports the per-ply inputs and the GRU step to JavaScript, and `tests/test_web.py` checks under Node that the browser's numbers match Python's to within 0.5 rating points.
+- Run it locally with `python -m http.server -d web` and open http://localhost:8000.
 - It follows the viewer's light or dark theme and works at phone width.
 
 <p>
@@ -250,6 +251,22 @@ On the same games, judging moves by quality finds the stronger player about 61�
 - **The GRU is trained on the first 200 plies** (99.9% of games).
 - **`se_shard` has only 11 degrees of freedom.**
 
+## Square Control Map: a Chrome extension
+
+`extension/` frames every square of the chess.com board by who controls it: blue when White has more pieces that could capture there, red when Black has, purple when equal. A thicker frame means a bigger majority (1, 2, 3+), and hovering a square shows the counts. A piece counts only if the capture would be legal: a pinned piece only along its pin line, and a king only on squares the opponent doesn't cover.
+
+It runs only on bot games (`/play/computer`) and analysis boards, never in games against people. It reads the position from chess.com's board (`getFEN()`), so it works with the canvas-drawn board. `tests/test_extension.py` checks its counts against python-chess.
+
+To install: open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the `extension` folder. Toggle it with the button at the bottom left or **Alt+C**.
+
+## Conventions
+
+- **Plies:** t = plies seen so far. Evaluation checkpoints: t = 2, 5, 10, 20, 30, 40, 60, 80.
+- **Seconds spent on a move:** the mover's previous clock − current clock + increment; on each side's first move, base − clock.
+- **Evals:** from White's view in pawns, clipped to ±10, with mate = ±10. A move's loss is the drop in the mover's eval, in pawns (≥ 0). White's first move has no loss, since there is no eval before it.
+- **Predictions:** every model writes `results/preds_<model>.parquet` with columns game_id, side ("white"/"black"), t, mean, lo, hi (90% interval), and `evaluate.py` scores them all the same way.
+- **Data:** `lichess/` holds the raw Parquet shards of the Hugging Face dataset `Lichess/standard-chess-games`; `games/part-*.parquet` the prepared games (White, Black, WhiteElo, BlackElo, ECO, TimeControl, moves in SAN, clocks, evals), one file per shard; `sample.parquet` the stratified sample.
+
 ## Repository layout
 
 | File | What it does |
@@ -264,8 +281,9 @@ On the same games, judging moves by quality finds the stronger player about 61�
 | `move_quality.py` | the per-player move-quality experiment |
 | `demo.py`, `app.py` | the Streamlit demo ([live](https://chess-rating-reader.streamlit.app/)) |
 | `export_web.py`, `web/` | the in-browser demo |
-| `test_*.py` | tests (pytest), run by GitHub Actions on every push |
-| `PLAN.md`, `CLAUDE.md` | the phase plan and the project conventions |
+| `extension/` | the Square Control Map Chrome extension |
+| `tests/` | tests (pytest), run by GitHub Actions on every push |
+| `sanity_check.ipynb` | checks on the prepared games before training |
 
 ## Reproduce
 
@@ -287,6 +305,6 @@ streamlit run app.py
 pytest
 ```
 
-Package versions and the dataset revision are pinned. Data files are not committed; the code, trained weights and small results (CSV, PNG) are.
+Package versions and the dataset revision are pinned. Data files are not committed; the code, trained weights (`model.pt`, `web/model.json`) and small results (CSV, PNG) are.
 
 Data: Lichess open database, CC0.

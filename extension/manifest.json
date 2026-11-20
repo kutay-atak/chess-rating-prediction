@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Square Control Map",
+  "version": "1.0.0",
+  "description": "Frames each square by who controls it on chess.com bot games and analysis boards.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.chess.com/*"],
+      "js": ["control.js", "content.js"],
+      "world": "MAIN"
+    }
+  ]
+}
