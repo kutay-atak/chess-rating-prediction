@@ -2,7 +2,7 @@
 
 For a side after the first t plies: how many moves it has made, how it used its clock, the time
 control, the opening family (from ply 10 on) and, if Lichess analysed the game, how much its moves
-lost by the engine's evaluation. Conventions (seconds spent, losses) are in CLAUDE.md.
+lost by the engine's evaluation. Conventions (seconds spent, losses) are in the README.
 """
 import numpy as np
 import pandas as pd

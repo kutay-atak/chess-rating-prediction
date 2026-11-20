@@ -9,12 +9,11 @@ anything, so a good move raises only the mover and the gap between them can grow
 - table from train players, alpha per checkpoint from val players (so 90% intervals cover 90%),
   scores on unseen test players, including how well the gap between the two players is found
 - writes results/move_quality.csv (test metrics; and both it and the GRU on the analysed test games
-  that are also in sample.parquet) and web/quality.json
+  that are also in sample.parquet)
 
 Usage: python move_quality.py
 """
 import glob
-import json
 
 import numpy as np
 import pandas as pd
@@ -33,7 +32,7 @@ MAX_PLY = max(CHECKPOINTS)
 
 
 def move_losses(evals):
-    """Loss of each ply's mover in pawns (CLAUDE.md conventions), NaN where an eval is missing or on White's first move."""
+    """Loss of each ply's mover in pawns (conventions in the README), NaN where an eval is missing or on White's first move."""
     evals = np.asarray(evals, dtype=float)
     before = np.concatenate([[np.nan], evals[:-1]])
     sign = np.where(np.arange(len(evals)) % 2 == 0, 1.0, -1.0)
@@ -187,10 +186,6 @@ def main():
                          gap_metrics(gru[gru.game.isin(shared)]).assign(model="gru", games="shared with gru")])
     metrics.to_csv("results/move_quality.csv", index=False, float_format="%.4f")
     print(metrics.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
-    with open("web/quality.json", "w") as f:
-        json.dump({"grid": GRID.tolist(), "loss_edges": LOSS_EDGES, "phase_edges": PHASE_EDGES,
-                   "log_prior": log_prior.round(5).tolist(), "log_lik": log_lik.round(5).tolist(),
-                   "alpha": {str(k): v for k, v in alpha.items()}, "checkpoints": CHECKPOINTS}, f)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 From games in games/ that Lichess analysed: one random game per player (seed 0), and at most one
 player per game, so the rows are independent. Indicators over that player's own moves (conventions
-in CLAUDE.md): log average loss, mistake rate, blunder rate, mean and sd of log seconds spent, and
+in the README): log average loss, mistake rate, blunder rate, mean and sd of log seconds spent, and
 the share of moves made with under 10% of base time left; plus rating and TimeControl.
 
 Usage: python sem_data.py   -> sem_data.csv
@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 from features import own_moves
 
 MIN_MOVES = 10  # rates over fewer moves with a loss are mostly noise
-LOW_CLOCK = 0.1  # "under 10% of base time left", as PLAN.md sets
+LOW_CLOCK = 0.1  # "low on time": under 10% of the base time left
 OUT = "sem_data.csv"
 
 

@@ -37,7 +37,7 @@ COLUMNS = ["game_id", "WhiteElo", "BlackElo", "TimeControl", "moves", "clocks", 
 
 
 def ply_inputs(clocks, base, inc):
-    """[plies, N_INPUTS] float32; row i describes ply i and its mover (conventions in CLAUDE.md)."""
+    """[plies, N_INPUTS] float32; row i describes ply i and its mover (conventions in the README)."""
     clocks = np.asarray(clocks, dtype=float)
     x = np.zeros((len(clocks), N_INPUTS), dtype=np.float32)
     for side in (0, 1):

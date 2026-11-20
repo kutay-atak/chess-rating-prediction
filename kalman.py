@@ -23,7 +23,7 @@ from features import CHECKPOINTS, own_moves
 
 MAX_PLY = max(CHECKPOINTS)  # the filters are scored up to ply 80, so later moves are not needed
 SIGNAL = ["log_spent", "clock_share", "ply"]  # no time control: the prior holds it, and every move would count it again
-N_MOVES = 2_000_000  # the per-move model's training sample, as PLAN.md sets
+N_MOVES = 2_000_000  # training sample for the per-move model: plenty for a few coefficients, and fast
 BIN_EDGES = [2, 10, 20, 40]  # ply bins for sigma²: the signal changes fastest in the opening (first moves spend no clock)
 Z = 1.645  # 90% Gaussian interval
 LAGS = 10  # residual autocorrelations printed, to compare with rho^lag
